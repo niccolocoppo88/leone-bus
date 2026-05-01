@@ -43,7 +43,8 @@ const STATE = {
     STATION_STOP: 'STATION_STOP',
     HIT: 'HIT',
     LEVEL_COMPLETE: 'LEVEL_COMPLETE',
-    WIN: 'WIN'
+    WIN: 'WIN',
+    GAME_OVER: 'GAME_OVER'
 };
 
 const LEVEL_1 = {
@@ -71,8 +72,79 @@ const LEVEL_1 = {
         { x: 160, y: -1600 },
         { x: 320, y: -1900 },
         { x: 240, y: -2500 }
+    ],
+    // Power-up spawn positions (type, x, worldY)
+    powerups: [
+        { type: 'shield', y: -500, x: 240 },
+        { type: 'magnet', y: -900, x: 120 },
+        { type: 'slowmo', y: -1500, x: 360 },
+        { type: 'jump', y: -2000, x: 180 },
+        { type: 'double', y: -2700, x: 300 }
     ]
 };
+
+// ============================================================================
+// POWER-UP POOL
+// ============================================================================
+
+class PowerUpPool {
+    // Durata power-up in millisecondi
+    static DURATIONS = {
+        shield: 5000,
+        magnet: 8000,
+        slowmo: 6000,
+        jump: 0,
+        double: 10000
+    };
+
+    constructor(maxSize = 10) {
+        this.pool = [];
+        this.active = [];
+        for (let i = 0; i < maxSize; i++) {
+            this.pool.push({ type: null, x: 0, y: 0, active: false, collected: false, rotation: 0 });
+        }
+    }
+
+    spawn(type, x, worldY) {
+        let pu = this.pool.pop();
+        if (!pu) pu = { type: null, x: 0, y: 0, active: false, collected: false, rotation: 0 };
+        pu.type = type;
+        pu.x = x;
+        pu.y = worldY;
+        pu.active = true;
+        pu.collected = false;
+        pu.rotation = 0;
+        this.active.push(pu);
+    }
+
+    update(dt, scrollSpeed) {
+        for (let i = this.active.length - 1; i >= 0; i--) {
+            const pu = this.active[i];
+            pu.y += scrollSpeed * dt;
+            pu.rotation += dt * 3;
+            if (pu.y > GAME_HEIGHT + 50) {
+                pu.active = false;
+                this.active.splice(i, 1);
+                this.pool.push(pu);
+            }
+        }
+    }
+
+    getActivePowerUps() { return this.active; }
+
+    getHitbox(pu) {
+        return { x: pu.x - 15, y: pu.y - 15, width: 30, height: 30 };
+    }
+
+    remove(pu) {
+        const idx = this.active.indexOf(pu);
+        if (idx !== -1) {
+            this.active.splice(idx, 1);
+            pu.active = false;
+            this.pool.push(pu);
+        }
+    }
+}
 
 // ============================================================================
 // INPUT CLASS
@@ -463,15 +535,23 @@ class Game {
         this.bus = null;
         this.obstaclePool = null;
         this.starPool = null;
+        this.powerUpPool = null;
         this.particles = null;
         this.stations = [];
         this.scoreManager = null;
         this.input = null;
         this.obstacleIndex = 0;
         this.starIndex = 0;
+        this.powerUpIndex = 0;
         this.currentLevel = null;
         this._currentStation = null;
         this.currentLevel = LEVEL_1;
+        // Power-up attivi: { type, remainingMs }
+        this.activePowerUps = {};
+        // Timer per auto-deattivazione (ms rimanenti)
+        this.powerUpTimers = {};
+        // Jump animation state
+        this.jumpState = { active: false, startY: 0, targetY: 0, progress: 0 };
     }
 
     init() {
@@ -479,9 +559,13 @@ class Game {
         this.bus = new Bus(GAME_WIDTH / 2 - 40, GAME_HEIGHT - 90);
         this.obstaclePool = new ObstaclePool(20);
         this.starPool = new StarPool(10);
+        this.powerUpPool = new PowerUpPool(10);
         this.particles = new ParticleSystem();
         this.scoreManager = new ScoreManager();
         this.stations = this.currentLevel.stations.map(s => new Station(s.x, s.y, s.children));
+        this.activePowerUps = {};
+        this.powerUpTimers = {};
+        this.jumpState = { active: false, startY: 0, targetY: 0, progress: 0 };
     }
 
     loadLevel(levelData) {
@@ -490,12 +574,17 @@ class Game {
         this.levelTime = 0;
         this.obstacleIndex = 0;
         this.starIndex = 0;
+        this.powerUpIndex = 0;
         this.bus = new Bus(GAME_WIDTH / 2 - 40, GAME_HEIGHT - 90);
         this.obstaclePool = new ObstaclePool(20);
         this.starPool = new StarPool(10);
+        this.powerUpPool = new PowerUpPool(10);
         this.particles = new ParticleSystem();
         this.stations = levelData.stations.map(s => new Station(s.x, s.y, s.children));
         this.scoreManager = new ScoreManager();
+        this.activePowerUps = {};
+        this.powerUpTimers = {};
+        this.jumpState = { active: false, startY: 0, targetY: 0, progress: 0 };
     }
 
     start() { this.state = STATE.INTRO; this.stateTimer = 0; }
@@ -513,6 +602,7 @@ class Game {
             case STATE.HIT: this.updateHit(dt); break;
             case STATE.LEVEL_COMPLETE: this.updateLevelComplete(dt); break;
             case STATE.WIN: this.updateWin(dt); break;
+            case STATE.GAME_OVER: this.updateGameOver(dt); break;
         }
     }
 
@@ -531,17 +621,27 @@ class Game {
     }
 
     updatePlaying(dt) {
-        this.scrollY += this.scrollSpeed * dt;
+        // Calcola scrollSpeed effettivo (slow-mo)
+        const effectiveSpeed = this.activePowerUps.slowmo
+            ? this.scrollSpeed * 0.4
+            : this.scrollSpeed;
+
+        this.scrollY += effectiveSpeed * dt;
         this.levelTime += dt;
         this.bus.update(dt, this.input);
         this.spawnObstacles();
         this.spawnStars();
-        this.obstaclePool.update(dt, this.scrollSpeed);
-        this.starPool.update(dt, this.scrollSpeed);
+        this.spawnPowerUps();
+        this.obstaclePool.update(dt, effectiveSpeed);
+        this.starPool.update(dt, effectiveSpeed);
+        this.powerUpPool.update(dt, effectiveSpeed);
+        this.updatePowerUps(dt);
+        this.updateJump(dt);
         this.particles.update(dt);
         for (let station of this.stations) station.update(dt);
         this.checkStationProximity();
         this.checkCollisions();
+        this.checkPowerUpCollisions();
         if (this.scrollY >= this.currentLevel.worldHeight) {
             this.transitionTo(STATE.LEVEL_COMPLETE);
         }
@@ -569,12 +669,19 @@ class Game {
         this.obstaclePool.update(dt, this.scrollSpeed * 0.5);
         if (this.stateTimer > 0.5) {
             if (this.scoreManager.lives <= 0) {
-                this.loadLevel(LEVEL_1);
-                this.scrollY = 0;
-                this.transitionTo(STATE.PLAYING);
+                this.transitionTo(STATE.GAME_OVER);
             } else {
                 this.transitionTo(STATE.PLAYING);
             }
+        }
+    }
+
+    updateGameOver(dt) {
+        this.particles.update(dt);
+        if (this.stateTimer > 1 && (this.input.isActionPressed() || this.input.isTouching)) {
+            this.loadLevel(LEVEL_1);
+            this.scrollY = 0;
+            this.transitionTo(STATE.PLAYING);
         }
     }
 
@@ -618,6 +725,87 @@ class Game {
         }
     }
 
+    spawnPowerUps() {
+        if (!this.currentLevel || !this.currentLevel.powerups) return;
+        while (this.powerUpIndex < this.currentLevel.powerups.length) {
+            const pu = this.currentLevel.powerups[this.powerUpIndex];
+            if (-this.scrollY <= pu.y + 300) {
+                this.powerUpPool.spawn(pu.type, pu.x, pu.y);
+                this.powerUpIndex++;
+            } else break;
+        }
+    }
+
+    activatePowerUp(type) {
+        this.activePowerUps[type] = true;
+        const duration = PowerUpPool.DURATIONS[type];
+        if (duration > 0) {
+            this.powerUpTimers[type] = duration;
+        }
+        // Super Salto: esegue subito il salto
+        if (type === 'jump') {
+            this.jumpState.active = true;
+            this.jumpState.startY = this.bus.y;
+            this.jumpState.targetY = this.bus.y - 60;
+            this.jumpState.progress = 0;
+        }
+    }
+
+    deactivatePowerUp(type) {
+        delete this.activePowerUps[type];
+        delete this.powerUpTimers[type];
+    }
+
+    updatePowerUps(dt) {
+        const dtMs = dt * 1000;
+        for (const type of Object.keys(this.powerUpTimers)) {
+            this.powerUpTimers[type] -= dtMs;
+            if (this.powerUpTimers[type] <= 0) {
+                this.deactivatePowerUp(type);
+            }
+        }
+    }
+
+    updateJump(dt) {
+        if (!this.jumpState.active) return;
+        this.jumpState.progress += dt * 3;
+        if (this.jumpState.progress >= 1) {
+            this.jumpState.progress = 1;
+            this.jumpState.active = false;
+            this.bus.y = this.jumpState.startY;
+        } else {
+            // Parabola: su e poi giu
+            const t = this.jumpState.progress;
+            const height = Math.sin(t * Math.PI) * 60;
+            this.bus.y = this.jumpState.startY - height;
+        }
+    }
+
+    checkPowerUpCollisions() {
+        if (this.bus.isHit) return;
+        const busHitbox = this.bus.getHitbox();
+        const powerUps = this.powerUpPool.getActivePowerUps();
+        for (let pu of powerUps) {
+            const puHitbox = this.powerUpPool.getHitbox(pu);
+            if (this.aabbCollision(busHitbox, puHitbox)) {
+                pu.collected = true;
+                this.powerUpPool.remove(pu);
+                this.activatePowerUp(pu.type);
+                // Particelle colorate in base al tipo
+                const colors = {
+                    shield: COLORS.SHIELD_BLUE,
+                    magnet: COLORS.MAGNET_RED,
+                    slowmo: COLORS.SLOWMO_PURPLE,
+                    jump: COLORS.JUMP_GREEN,
+                    double: COLORS.DOUBLE_GOLD
+                };
+                this.particles.emit(pu.x, pu.y, 15, {
+                    speed: 80, life: 0.6, color: colors[pu.type] || '#FFFFFF', size: 5
+                });
+            }
+        }
+    }
+
     checkStationProximity() {
         if (this.bus.isHit) return;
         for (let station of this.stations) {
@@ -632,7 +820,7 @@ class Game {
                 this.transitionTo(STATE.STATION_STOP);
                 return;
             } else if (distance < 30 && !station.collected) {
-                station.collected = true;
+                // Doppio-punishment rimosso: il passeggero non viene perso insieme alla vita
                 this.scoreManager.loseLife();
                 this.particles.emitHit(this.bus.x + this.bus.width / 2, this.bus.y);
                 this.bus.hit();
@@ -650,6 +838,12 @@ class Game {
             const obsHitbox = this.obstaclePool.getHitbox(obs);
             if (this.aabbCollision(busHitbox, obsHitbox)) {
                 obs.hit = true;
+                // Se scudo attivo, ignora collisione
+                if (this.activePowerUps.shield) {
+                    this.particles.emit(obs.x + obs.width / 2, obs.y + obs.height / 2, 8,
+                        { speed: 60, life: 0.4, color: COLORS.SHIELD_BLUE, size: 3 });
+                    continue;
+                }
                 this.scoreManager.loseLife();
                 this.particles.emitHit(obs.x + obs.width / 2, obs.y + obs.height / 2);
                 this.bus.hit();
@@ -658,12 +852,31 @@ class Game {
             }
         }
         const stars = this.starPool.getActiveStars();
+        const busCenterX = this.bus.x + this.bus.width / 2;
+        const busCenterY = this.bus.y + this.bus.height / 2;
         for (let star of stars) {
+            // Magnet effect: attrazione stelle verso il bus
+            if (this.activePowerUps.magnet) {
+                const dx = busCenterX - star.x;
+                const dy = busCenterY - star.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < 150) {
+                    const force = 300 * dt;
+                    star.x += (dx / dist) * force;
+                    star.y += (dy / dist) * force;
+                }
+            }
             const starHitbox = this.starPool.getHitbox(star);
             if (this.aabbCollision(busHitbox, starHitbox)) {
                 star.collected = true;
                 star.active = false;
-                this.scoreManager.collectStar();
+                const starIdx = this.starPool.active.indexOf(star);
+                if (starIdx !== -1) this.starPool.active.splice(starIdx, 1);
+                // Stelle x2
+                const points = this.activePowerUps.double ? 2 : 1;
+                for (let i = 0; i < points; i++) {
+                    this.scoreManager.collectStar();
+                }
                 this.particles.emitSparkle(star.x, star.y);
             }
         }
@@ -690,6 +903,9 @@ class Game {
     getParticles() { return this.particles; }
     getStations() { return this.stations; }
     getScoreManager() { return this.scoreManager; }
+    getPowerUpPool() { return this.powerUpPool; }
+    getActivePowerUps() { return this.activePowerUps; }
+    isPowerUpActive(type) { return !!this.activePowerUps[type]; }
 }
 
 // ============================================================================
@@ -725,6 +941,12 @@ const COLORS = {
     HEART_EMPTY: '#CCCCCC',
     CLOUD: '#FFFFFF',
     SHADOW: 'rgba(0,0,0,0.2)',
+    // Power-up colors
+    SHIELD_BLUE: '#4FC3F7',
+    MAGNET_RED: '#E53935',
+    SLOWMO_PURPLE: '#9C27B0',
+    JUMP_GREEN: '#4CAF50',
+    DOUBLE_GOLD: '#FFD700'
 };
 
 const _renderGameWidth = 480;
@@ -822,78 +1044,85 @@ function renderRoad(ctx, scrollY) {
 // RENDERING — Bus
 // ============================================================================
 
+// Bus orientato upward: più alto che largo (45x80)
+// Driver (Leone) in basso, muso giallo in alto
 function renderBus(ctx, bus) {
     ctx.save();
+    // Centro del bus per rotazione
     ctx.translate(bus.x + bus.width / 2, bus.y + bus.height / 2);
     ctx.rotate(bus.tilt);
     ctx.translate(-bus.width / 2, -bus.height / 2);
 
+    const bw = bus.width;   // 45 - larghezza (asse corto)
+    const bh = bus.height;  // 80 - altezza (asse lungo)
+
     // Shadow
     ctx.fillStyle = COLORS.SHADOW;
     ctx.beginPath();
-    ctx.ellipse(bus.width / 2, bus.height + 3, bus.width / 2 - 5, 6, 0, 0, Math.PI * 2);
+    ctx.ellipse(bw / 2, bh + 3, bw / 2 - 5, 6, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Body
+    // Body - orientato verticalmente
     ctx.fillStyle = COLORS.YELLOW_BUS;
-    _rrect(ctx, 0, 5, bus.width, bus.height - 5, 8);
+    _rrect(ctx, 0, 5, bw, bh - 5, 8);
     ctx.fill();
 
-    // Dark bottom
+    // Dark bottom (lato driver in basso)
     ctx.fillStyle = COLORS.YELLOW_BUS_DARK;
-    ctx.fillRect(5, bus.height - 12, bus.width - 10, 7);
+    ctx.fillRect(5, bh - 12, bw - 10, 7);
 
-    // Windows
+    // Windows - 3 finestrini verticali sul retro
     ctx.fillStyle = COLORS.WINDOW_BLUE;
-    const winY = 12;
-    const winH = 18;
+    const winX = 8;
+    const winW = 18;
+    const winH = 12;
     for (let i = 0; i < 3; i++) {
-        const wx = 8 + i * 24;
-        ctx.fillRect(wx, winY, 18, winH);
+        const wy = 15 + i * 16;
+        ctx.fillRect(winX, wy, winW, winH);
     }
 
-    // Driver window (Leone)
+    // Driver (Leone con cappellino rosso) - in basso
     ctx.fillStyle = '#333';
-    ctx.fillRect(bus.width - 22, 8, 16, 22);
+    ctx.fillRect(bw - 20, bh - 28, 16, 22);
     ctx.fillStyle = COLORS.CHILD_SKIN;
     ctx.beginPath();
-    ctx.arc(bus.width - 14, 16, 6, 0, Math.PI * 2);
+    ctx.arc(bw - 12, bh - 18, 6, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = COLORS.CHILD_HAT;
     ctx.beginPath();
-    ctx.arc(bus.width - 14, 12, 5, Math.PI, Math.PI * 2);
+    ctx.arc(bw - 12, bh - 22, 5, Math.PI, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = '#222';
-    ctx.fillRect(bus.width - 18, 20, 8, 2);
+    ctx.fillRect(bw - 16, bh - 14, 8, 2);
 
-    // Headlight
+    // Headlight - muso in alto
     ctx.fillStyle = '#FFF9C4';
     ctx.beginPath();
-    ctx.arc(5, bus.height / 2, 4, 0, Math.PI * 2);
+    ctx.arc(bw / 2, 8, 4, 0, Math.PI * 2);
     ctx.fill();
 
     // Turn signals
     if (bus.doorsOpen || bus.isAtStation) {
         if (bus.blinkOn) {
             ctx.fillStyle = '#FF9800';
-            ctx.fillRect(bus.width - 4, 10, 4, 8);
-            ctx.fillRect(0, 10, 4, 8);
+            ctx.fillRect(10, 4, 8, 4);
+            ctx.fillRect(bw - 18, 4, 8, 4);
         }
     }
 
-    // Wheels
+    // Ruote sui lati
     ctx.fillStyle = COLORS.WHEEL_COLOR;
     ctx.beginPath();
-    ctx.arc(15, bus.height, 7, 0, Math.PI * 2);
+    ctx.arc(-3, 25, 7, 0, Math.PI * 2);
     ctx.fill();
     ctx.beginPath();
-    ctx.arc(bus.width - 15, bus.height, 7, 0, Math.PI * 2);
+    ctx.arc(-3, bh - 25, 7, 0, Math.PI * 2);
     ctx.fill();
 
-    // Door
+    // Door - sportello a destra
     if (bus.doorsOpen) {
         ctx.fillStyle = '#333';
-        ctx.fillRect(30, 15, 12, 22);
+        ctx.fillRect(bw - 16, 15, 12, 22);
     }
 
     ctx.restore();
@@ -1066,6 +1295,202 @@ function renderStationShape(ctx, station) {
 }
 
 // ============================================================================
+// RENDERING — Power-Up
+// ============================================================================
+
+function renderPowerUpShape(ctx, pu) {
+    ctx.save();
+    ctx.translate(pu.x, pu.y);
+    ctx.rotate(pu.rotation);
+
+    const size = 15;
+    if (pu.type === 'shield') {
+        // Scudo: cerchio blu con icona scudo
+        ctx.fillStyle = COLORS.SHIELD_BLUE;
+        ctx.beginPath();
+        ctx.arc(0, 0, size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#FFFFFF';
+        ctx.beginPath();
+        ctx.moveTo(0, -8);
+        ctx.lineTo(8, 2);
+        ctx.lineTo(4, 2);
+        ctx.lineTo(4, 8);
+        ctx.lineTo(-4, 8);
+        ctx.lineTo(-4, 2);
+        ctx.lineTo(-8, 2);
+        ctx.closePath();
+        ctx.fill();
+    } else if (pu.type === 'magnet') {
+        // Magnete: ferro di cavallo rosso con U
+        ctx.fillStyle = COLORS.MAGNET_RED;
+        ctx.beginPath();
+        ctx.arc(0, 4, size, Math.PI, 0, false);
+        ctx.lineTo(size, -8);
+        ctx.lineTo(size * 0.5, -8);
+        ctx.lineTo(size * 0.5, -2);
+        ctx.arc(0, -2, size * 0.5, 0, Math.PI, false);
+        ctx.lineTo(-size * 0.5, -2);
+        ctx.lineTo(-size * 0.5, -8);
+        ctx.lineTo(-size, -8);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 12px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('U', 0, 2);
+    } else if (pu.type === 'slowmo') {
+        // Tempo lento: orologio viola
+        ctx.fillStyle = COLORS.SLOWMO_PURPLE;
+        ctx.beginPath();
+        ctx.arc(0, 0, size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(0, 0, size - 4, 0, Math.PI * 2);
+        ctx.stroke();
+        // Lancette
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(0, -6);
+        ctx.moveTo(0, 0);
+        ctx.lineTo(4, 2);
+        ctx.stroke();
+    } else if (pu.type === 'jump') {
+        // Super salto: freccia su verde
+        ctx.fillStyle = COLORS.JUMP_GREEN;
+        ctx.beginPath();
+        ctx.moveTo(0, -size);
+        ctx.lineTo(size, 4);
+        ctx.lineTo(size * 0.4, 4);
+        ctx.lineTo(size * 0.4, size);
+        ctx.lineTo(-size * 0.4, size);
+        ctx.lineTo(-size * 0.4, 4);
+        ctx.lineTo(-size, 4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 10px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('▲', 0, 2);
+    } else if (pu.type === 'double') {
+        // Stelle x2: stella doppia dorata
+        ctx.fillStyle = COLORS.DOUBLE_GOLD;
+        _star(ctx, -6, 0, 5, 10, 4, 0);
+        ctx.fill();
+        _star(ctx, 6, 0, 5, 10, 4, 0.3);
+        ctx.fill();
+    }
+
+    ctx.restore();
+}
+
+// Effetti visivi per power-up attivi
+function renderPowerUpEffects(ctx, game) {
+    const bus = game.getBus();
+    const activePowerUps = game.getActivePowerUps();
+    const busCenterX = bus.x + bus.width / 2;
+    const busCenterY = bus.y + bus.height / 2;
+
+    // Scudo: alone blu attorno al bus
+    if (activePowerUps.shield) {
+        ctx.save();
+        ctx.globalAlpha = 0.3 + Math.sin(Date.now() / 100) * 0.1;
+        ctx.strokeStyle = COLORS.SHIELD_BLUE;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(busCenterX, busCenterY, 50, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 0.15 + Math.sin(Date.now() / 80) * 0.05;
+        ctx.fillStyle = COLORS.SHIELD_BLUE;
+        ctx.beginPath();
+        ctx.arc(busCenterX, busCenterY, 55, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+
+    // Magnete: linee magnetiche dal bus
+    if (activePowerUps.magnet) {
+        ctx.save();
+        ctx.strokeStyle = COLORS.MAGNET_RED;
+        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.4 + Math.sin(Date.now() / 60) * 0.2;
+        for (let i = 0; i < 6; i++) {
+            const angle = (Date.now() / 500 + i * Math.PI / 3) % (Math.PI * 2);
+            const r1 = 30;
+            const r2 = 80;
+            ctx.beginPath();
+            ctx.moveTo(busCenterX + Math.cos(angle) * r1, busCenterY + Math.sin(angle) * r1);
+            ctx.lineTo(busCenterX + Math.cos(angle) * r2, busCenterY + Math.sin(angle) * r2);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+
+    // Tempo lento: vignette sfocata ai bordi
+    if (activePowerUps.slowmo) {
+        ctx.save();
+        const g = ctx.createRadialGradient(
+            busCenterX, busCenterY, 50,
+            busCenterX, busCenterY, 200
+        );
+        g.addColorStop(0, 'rgba(156, 39, 176, 0)');
+        g.addColorStop(0.5, 'rgba(156, 39, 176, 0.1)');
+        g.addColorStop(1, 'rgba(156, 39, 176, 0.4)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, _renderGameWidth, _renderGameHeight);
+        ctx.restore();
+    }
+
+    // Stelle x2: aura dorata attorno alle stelle sullo schermo
+    if (activePowerUps.double) {
+        for (let star of game.getStarPool().getActiveStars()) {
+            ctx.save();
+            ctx.globalAlpha = 0.3 + Math.sin(Date.now() / 80) * 0.1;
+            ctx.fillStyle = COLORS.DOUBLE_GOLD;
+            ctx.beginPath();
+            ctx.arc(star.x, star.y, 18, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+}
+
+// UI indicator per power-up attivi
+function renderPowerUpIndicators(ctx, game) {
+    const activePowerUps = game.activePowerUps;
+    const powerUpTimers = game.powerUpTimers;
+    let yOffset = 45;
+
+    // Iconine in alto a destra per power-up temporizzati (shield, magnet, slowmo, double)
+    const timedPowerUps = ['shield', 'magnet', 'slowmo', 'double'];
+    const labels = { shield: '🛡️', magnet: '🧲', slowmo: '⏰', double: '✨' };
+    const colors = {
+        shield: COLORS.SHIELD_BLUE,
+        magnet: COLORS.MAGNET_RED,
+        slowmo: COLORS.SLOWMO_PURPLE,
+        double: COLORS.DOUBLE_GOLD
+    };
+
+    for (const type of timedPowerUps) {
+        if (activePowerUps[type]) {
+            const remaining = powerUpTimers[type] ? Math.ceil(powerUpTimers[type] / 1000) : 0;
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+            ctx.fillRect(_renderGameWidth - 65, yOffset - 10, 60, 14);
+            ctx.fillStyle = colors[type] || '#FFFFFF';
+            ctx.font = 'bold 10px Arial';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(labels[type] + ' ' + remaining + 's', _renderGameWidth - 60, yOffset);
+            yOffset += 16;
+        }
+    }
+}
+
+// ============================================================================
 // RENDERING — UI
 // ============================================================================
 
@@ -1157,8 +1582,19 @@ function doRender(ctx, game) {
         }
     }
 
+    // Power-ups
+    for (let pu of game.getPowerUpPool().getActivePowerUps()) {
+        const py = pu.y + scrollOffset;
+        if (py > -30 && py < _renderGameHeight + 30) {
+            renderPowerUpShape(ctx, pu);
+        }
+    }
+
     // Bus
     renderBus(ctx, game.getBus());
+
+    // Power-up effects (after bus so they render on top)
+    renderPowerUpEffects(ctx, game);
 
     // Particles
     game.getParticles().render(ctx);
@@ -1168,6 +1604,7 @@ function doRender(ctx, game) {
     renderHearts(ctx, sm.lives, sm.maxLives, 8, 16);
     renderStarCounter(ctx, sm.starsCollected, _renderGameWidth - 60, 12);
     renderFriendCounter(ctx, sm.friendsCollected, sm.totalFriends, _renderGameWidth - 60, 28);
+    renderPowerUpIndicators(ctx, game);
 
     ctx.restore();
 }
@@ -1260,6 +1697,42 @@ class AudioManager {
         this._tone(200, 0.05, 'sawtooth', 0.1);
     }
 
+    playPowerUpCollect() {
+        // Suono arcade power-up: arpeggio ascendente
+        this._tone(523, 0.1, 'square', 0.3, 0);
+        this._tone(659, 0.1, 'square', 0.3, 0.08);
+        this._tone(784, 0.1, 'square', 0.3, 0.16);
+        this._tone(1047, 0.2, 'square', 0.25, 0.24);
+    }
+
+    playPowerUpShield() {
+        // Suono scudo: tintinnio metallico
+        this._tone(800, 0.15, 'triangle', 0.25, 0);
+        this._tone(1200, 0.1, 'triangle', 0.2, 0.1);
+    }
+
+    playPowerUpMagnet() {
+        // Suono magnete: ronzio
+        this._sweep(400, 600, 0.3, 'sawtooth', 0.15);
+    }
+
+    playPowerUpSlowmo() {
+        // Suono slow-mo: whirring discendente
+        this._sweep(600, 200, 0.4, 'sine', 0.2);
+    }
+
+    playPowerUpJump() {
+        // Suono salto: boing
+        this._sweep(300, 500, 0.15, 'triangle', 0.25);
+        this._sweep(500, 300, 0.1, 'triangle', 0.2, 0.1);
+    }
+
+    playPowerUpDouble() {
+        // Suono stelle x2: ding dorato
+        this._tone(880, 0.1, 'square', 0.3, 0);
+        this._tone(1320, 0.15, 'square', 0.25, 0.08);
+    }
+
     startBGM() {
         if (!this.ctx || this.isPlaying) return;
         this.isPlaying = true;
@@ -1332,11 +1805,11 @@ class GameRunner {
     }
 
     _resize() {
-        const scale = Math.min(
+        const scale = Math.max(1, Math.min(
             Math.floor(window.innerWidth / _renderGameWidth),
             Math.floor(window.innerHeight / _renderGameHeight),
             4
-        );
+        ));
         this.canvas.style.width = (_renderGameWidth * scale) + 'px';
         this.canvas.style.height = (_renderGameHeight * scale) + 'px';
     }
@@ -1413,6 +1886,7 @@ class GameRunner {
     _prevStars = 0;
     _prevLives = 3;
     _prevFriends = 0;
+    _prevPowerUps = {};
 
     _checkAudioTriggers() {
         const state = this.game.getState();
@@ -1459,6 +1933,20 @@ class GameRunner {
             this.audio.playStationComplete();
             this._prevFriends = sm.friendsCollected;
         }
+
+        // Power-up activation audio
+        const activePowerUps = this.game.getActivePowerUps();
+        for (const type of ['shield', 'magnet', 'slowmo', 'jump', 'double']) {
+            if (activePowerUps[type] && !this._prevPowerUps[type]) {
+                this.audio.playPowerUpCollect();
+                if (type === 'shield') this.audio.playPowerUpShield();
+                else if (type === 'magnet') this.audio.playPowerUpMagnet();
+                else if (type === 'slowmo') this.audio.playPowerUpSlowmo();
+                else if (type === 'jump') this.audio.playPowerUpJump();
+                else if (type === 'double') this.audio.playPowerUpDouble();
+            }
+        }
+        this._prevPowerUps = { ...activePowerUps };
     }
 
     _render() {
@@ -1471,6 +1959,8 @@ class GameRunner {
             this._renderTitle();
         } else if (state === STATE.WIN) {
             this._renderWin();
+        } else if (state === STATE.GAME_OVER) {
+            this._renderGameOver();
         } else {
             doRender(ctx, this.game);
             this._renderOverlay(state);
@@ -1526,6 +2016,43 @@ class GameRunner {
         ctx.fillStyle = '#FFD700';
         ctx.font = '12px Fredoka One, Comic Sans MS, cursive';
         ctx.fillText('▶ tocca per ricominciare ◀', _renderGameWidth / 2, 200);
+    }
+
+    _renderGameOver() {
+        const ctx = this.ctx;
+        ctx.fillStyle = '#2a1a2a';
+        ctx.fillRect(0, 0, _renderGameWidth, _renderGameHeight);
+
+        // Cuori vuoti
+        const heartSpacing = 40;
+        const heartsStartX = _renderGameWidth / 2 - heartSpacing;
+        for (let i = 0; i < 3; i++) {
+            const hx = heartsStartX + i * heartSpacing;
+            const hy = 130;
+            ctx.fillStyle = '#555';
+            ctx.font = '24px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('♥', hx, hy);
+        }
+
+        // Titolo OH NO!
+        ctx.fillStyle = '#FF4444';
+        ctx.font = 'bold 36px Fredoka One, Comic Sans MS, cursive';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('OH NO!', _renderGameWidth / 2, 80);
+
+        // Raccoglieremo poi i dati del punteggio
+        const sm = this.game.getScoreManager();
+        ctx.fillStyle = '#FFF';
+        ctx.font = '14px Fredoka One, Comic Sans MS, cursive';
+        ctx.fillText('Stelle raccolte: ' + sm.starsCollected, _renderGameWidth / 2, 175);
+        ctx.fillText('Amici salvati: ' + sm.friendsCollected + '/' + sm.totalFriends, _renderGameWidth / 2, 195);
+
+        ctx.fillStyle = '#FFD700';
+        ctx.font = '12px Fredoka One, Comic Sans MS, cursive';
+        ctx.fillText('▶ tocca per riprovare ◀', _renderGameWidth / 2, 230);
     }
 
     _renderOverlay(state) {
