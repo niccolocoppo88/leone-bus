@@ -1,0 +1,1563 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Leone Bus — Il Giorno dello Scuolabus</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      background: #1a1a2e;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: hidden;
+      font-family: 'Fredoka One', 'Comic Sans MS', cursive, sans-serif;
+    }
+    #game-canvas {
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game-canvas"></canvas>
+<script>
+// ============================================================================
+// ENGINE.JS — Game Logic
+// ============================================================================
+
+const GAME_WIDTH = 480;
+const GAME_HEIGHT = 270;
+const BASE_SCROLL_SPEED = 80;
+const BUS_SPEED_X = 200;
+const FIXED_TIMESTEP = 1 / 60;
+const MAX_ACCUMULATOR = 0.1;
+
+const STATE = {
+    TITLE: 'TITLE',
+    INTRO: 'INTRO',
+    PLAYING: 'PLAYING',
+    STATION_STOP: 'STATION_STOP',
+    HIT: 'HIT',
+    LEVEL_COMPLETE: 'LEVEL_COMPLETE',
+    WIN: 'WIN'
+};
+
+const LEVEL_1 = {
+    duration: 60,
+    scrollSpeed: BASE_SCROLL_SPEED,
+    worldHeight: 3000,
+    stations: [
+        { y: -600, collected: false, children: 1, x: 160 },
+        { y: -1400, collected: false, children: 1, x: 320 },
+        { y: -2300, collected: false, children: 1, x: 240 }
+    ],
+    obstacles: [
+        { type: 'cone', lane: 1, y: -300, width: 20, height: 30 },
+        { type: 'cow', lane: -1, y: -700, direction: 1, width: 40, height: 30 },
+        { type: 'cone', lane: 0, y: -1100, width: 20, height: 30 },
+        { type: 'cone', lane: 2, y: -1700, width: 20, height: 30 },
+        { type: 'tree', lane: 1, y: -2100, width: 30, height: 40 }
+    ],
+    stars: [
+        { x: 100, y: -200 },
+        { x: 380, y: -400 },
+        { x: 240, y: -800 },
+        { x: 80, y: -1000 },
+        { x: 400, y: -1300 },
+        { x: 160, y: -1600 },
+        { x: 320, y: -1900 },
+        { x: 240, y: -2500 }
+    ]
+};
+
+// ============================================================================
+// INPUT CLASS
+// ============================================================================
+
+class Input {
+    constructor() {
+        this.keys = {};
+        this.touchStartX = 0;
+        this.touchCurrentX = 0;
+        this.isTouching = false;
+        this.dragDeltaX = 0;
+        this.touchEnabled = true;
+        this.keyboardEnabled = true;
+        this._prevKeys = {};
+        this._bindKeyboard();
+        this._bindTouch();
+    }
+
+    _bindKeyboard() {
+        window.addEventListener('keydown', (e) => {
+            this.keys[e.code] = true;
+        });
+        window.addEventListener('keyup', (e) => {
+            this.keys[e.code] = false;
+        });
+    }
+
+    _bindTouch() {
+        window.addEventListener('touchstart', (e) => {
+            if (!this.touchEnabled) return;
+            this.isTouching = true;
+            this.touchStartX = e.touches[0].clientX;
+            this.touchCurrentX = this.touchStartX;
+            this.dragDeltaX = 0;
+        }, { passive: true });
+
+        window.addEventListener('touchmove', (e) => {
+            if (!this.isTouching || !this.touchEnabled) return;
+            this.touchCurrentX = e.touches[0].clientX;
+            this.dragDeltaX = this.touchCurrentX - this.touchStartX;
+        }, { passive: true });
+
+        window.addEventListener('touchend', () => {
+            this.isTouching = false;
+            this.dragDeltaX = 0;
+        });
+    }
+
+    isDown(code) { return !!this.keys[code]; }
+
+    justPressed(code) {
+        if (this.keys[code] && !this._prevKeys[code]) return true;
+        return false;
+    }
+
+    flush() { this._prevKeys = { ...this.keys }; }
+
+    isActionPressed() {
+        return this.justPressed('Space') || this.justPressed('Enter');
+    }
+
+    getHorizontal() {
+        let h = 0;
+        if (this.keyboardEnabled) {
+            if (this.isDown('ArrowLeft') || this.isDown('KeyA')) h -= 1;
+            if (this.isDown('ArrowRight') || this.isDown('KeyD')) h += 1;
+        }
+        if (this.isTouching && this.touchEnabled) {
+            if (this.dragDeltaX > 10) h = 1;
+            else if (this.dragDeltaX < -10) h = -1;
+        }
+        return h;
+    }
+}
+
+// ============================================================================
+// BUS CLASS
+// ============================================================================
+
+class Bus {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.width = 80;
+        this.height = 45;
+        this.vx = 0;
+        this.targetVx = 0;
+        this.speed = BUS_SPEED_X;
+        this.lane = 1;
+        this.laneWidth = GAME_WIDTH / 3;
+        this.isHit = false;
+        this.isAtStation = false;
+        this.doorsOpen = false;
+        this.tilt = 0;
+        this.blinkTimer = 0;
+        this.blinkOn = false;
+        this.hitTimer = 0;
+    }
+
+    update(dt, input) {
+        if (this.isHit) {
+            this.hitTimer -= dt;
+            if (this.hitTimer <= 0) this.isHit = false;
+            return;
+        }
+
+        this.blinkTimer += dt;
+        if (this.blinkTimer > 0.3) {
+            this.blinkTimer = 0;
+            this.blinkOn = !this.blinkOn;
+        }
+
+        const h = input.getHorizontal();
+        if (h !== 0) {
+            this.targetVx = h * this.speed;
+        } else {
+            this.targetVx = 0;
+        }
+
+        const accel = 800;
+        if (this.targetVx > this.vx) {
+            this.vx = Math.min(this.targetVx, this.vx + accel * dt);
+        } else if (this.targetVx < this.vx) {
+            this.vx = Math.max(this.targetVx, this.vx - accel * dt);
+        }
+
+        this.x += this.vx * dt;
+        this.x = Math.max(10, Math.min(GAME_WIDTH - this.width - 10, this.x));
+
+        this.tilt = (this.vx / this.speed) * 0.1;
+        this.lane = Math.floor((this.x + this.width / 2) / this.laneWidth);
+    }
+
+    openDoors() { this.doorsOpen = true; }
+    closeDoors() { this.doorsOpen = false; }
+    hit() { this.isHit = true; this.hitTimer = 0.5; }
+
+    getHitbox() {
+        const margin = 0.2;
+        return {
+            x: this.x + this.width * margin,
+            y: this.y + this.height * margin,
+            width: this.width * (1 - 2 * margin),
+            height: this.height * (1 - 2 * margin)
+        };
+    }
+}
+
+// ============================================================================
+// OBSTACLE POOL
+// ============================================================================
+
+class ObstaclePool {
+    constructor(maxSize = 20) {
+        this.pool = [];
+        this.active = [];
+        this.maxSize = maxSize;
+        for (let i = 0; i < maxSize; i++) {
+            this.pool.push(this._createEmpty());
+        }
+    }
+
+    _createEmpty() {
+        return { type: null, x: 0, y: 0, width: 0, height: 0, lane: 0, active: false, hit: false, direction: 1, vx: 0 };
+    }
+
+    spawn(type, lane, worldY, opts = {}) {
+        let obs = this.pool.pop();
+        if (!obs) obs = this._createEmpty();
+        obs.type = type;
+        obs.lane = lane;
+        obs.active = true;
+        obs.hit = false;
+        obs.direction = opts.direction || 1;
+        obs.vx = 0;
+
+        if (type === 'cow') {
+            obs.x = lane < 0 ? -40 : GAME_WIDTH + 40;
+            obs.y = worldY;
+            obs.width = opts.width || 40;
+            obs.height = opts.height || 30;
+            obs.vx = obs.direction * 50;
+        } else if (type === 'cone') {
+            const laneWidth = GAME_WIDTH / 3;
+            obs.x = lane * laneWidth + laneWidth / 2 - 10;
+            obs.y = worldY;
+            obs.width = opts.width || 20;
+            obs.height = opts.height || 30;
+        } else if (type === 'tree') {
+            const laneWidth = GAME_WIDTH / 3;
+            obs.x = lane * laneWidth + laneWidth / 2 - 15;
+            obs.y = worldY;
+            obs.width = opts.width || 30;
+            obs.height = opts.height || 40;
+        }
+        this.active.push(obs);
+    }
+
+    update(dt, scrollSpeed) {
+        for (let i = this.active.length - 1; i >= 0; i--) {
+            const obs = this.active[i];
+            if (obs.type === 'cow') {
+                obs.x += obs.vx * dt;
+                obs.y += scrollSpeed * dt;
+                if (obs.x < -100 || obs.x > GAME_WIDTH + 100) {
+                    obs.active = false;
+                    this.active.splice(i, 1);
+                    this.pool.push(obs);
+                }
+            } else {
+                obs.y += scrollSpeed * dt;
+                if (obs.y > GAME_HEIGHT + 100) {
+                    obs.active = false;
+                    this.active.splice(i, 1);
+                    this.pool.push(obs);
+                }
+            }
+        }
+    }
+
+    getActiveObstacles() { return this.active; }
+
+    getHitbox(obs) {
+        return { x: obs.x, y: obs.y, width: obs.width, height: obs.height };
+    }
+}
+
+// ============================================================================
+// STAR POOL
+// ============================================================================
+
+class StarPool {
+    constructor(maxSize = 10) {
+        this.pool = [];
+        this.active = [];
+        for (let i = 0; i < maxSize; i++) {
+            this.pool.push({ x: 0, y: 0, active: false, collected: false, rotation: 0, scale: 1 });
+        }
+    }
+
+    spawn(x, worldY) {
+        let star = this.pool.pop();
+        if (!star) star = { x: 0, y: 0, active: false, collected: false, rotation: 0, scale: 1 };
+        star.x = x;
+        star.y = worldY;
+        star.active = true;
+        star.collected = false;
+        star.rotation = 0;
+        star.scale = 1;
+        this.active.push(star);
+    }
+
+    update(dt, scrollSpeed) {
+        for (let i = this.active.length - 1; i >= 0; i--) {
+            const s = this.active[i];
+            s.y += scrollSpeed * dt;
+            s.rotation += dt * 2;
+            s.scale = 1 + Math.sin(s.rotation * 2) * 0.1;
+            if (s.y > GAME_HEIGHT + 50) {
+                s.active = false;
+                this.active.splice(i, 1);
+                this.pool.push(s);
+            }
+        }
+    }
+
+    getActiveStars() { return this.active; }
+    getHitbox(star) { return { x: star.x - 12, y: star.y - 12, width: 24, height: 24 }; }
+}
+
+// ============================================================================
+// PARTICLE SYSTEM
+// ============================================================================
+
+class ParticleSystem {
+    constructor() {
+        this.particles = [];
+        this.maxParticles = 200;
+    }
+
+    emit(x, y, count, config = {}) {
+        const { speed = 100, angle = -Math.PI / 2, spread = Math.PI * 2,
+            life = 1, color = '#FFD700', size = 4 } = config;
+        for (let i = 0; i < count; i++) {
+            if (this.particles.length >= this.maxParticles) break;
+            const dir = angle + (Math.random() - 0.5) * spread;
+            const spd = speed * (0.5 + Math.random() * 0.5);
+            this.particles.push({
+                x, y,
+                vx: Math.cos(dir) * spd,
+                vy: Math.sin(dir) * spd,
+                life: life * (0.5 + Math.random() * 0.5),
+                maxLife: life,
+                color,
+                size: size * (0.5 + Math.random() * 0.5)
+            });
+        }
+    }
+
+    emitSparkle(x, y) {
+        this.emit(x, y, 15, { speed: 80, life: 0.6, color: '#FFD700', size: 4 });
+        this.emit(x, y, 8, { speed: 50, angle: -Math.PI, life: 0.8, color: '#FFFACD', size: 3 });
+    }
+
+    emitHit(x, y) {
+        this.emit(x, y, 10, { speed: 60, life: 0.4, color: '#FF6B35', size: 3 });
+    }
+
+    update(dt) {
+        for (let i = this.particles.length - 1; i >= 0; i--) {
+            const p = this.particles[i];
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.vy += 200 * dt;
+            p.life -= dt;
+            if (p.life <= 0) this.particles.splice(i, 1);
+        }
+    }
+
+    render(ctx) {
+        for (const p of this.particles) {
+            const alpha = p.life / p.maxLife;
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = p.color;
+            ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+        }
+        ctx.globalAlpha = 1;
+    }
+}
+
+// ============================================================================
+// STATION CLASS
+// ============================================================================
+
+class Station {
+    constructor(x, y, children = 1) {
+        this.x = x;
+        this.y = y;
+        this.children = children;
+        this.collected = false;
+        this.childWaiting = true;
+        this.timer = 0;
+    }
+
+    update(dt) {
+        if (this.collected) return;
+    }
+
+    activateChild() { this.childWaiting = true; }
+    getHitbox() { return { x: this.x - 30, y: this.y - 30, width: 60, height: 60 }; }
+}
+
+// ============================================================================
+// SCORE MANAGER
+// ============================================================================
+
+class ScoreManager {
+    constructor() {
+        this.lives = 3;
+        this.maxLives = 3;
+        this.starsCollected = 0;
+        this.friendsCollected = 0;
+        this.totalFriends = 3;
+    }
+
+    loseLife() {
+        this.lives = Math.max(0, this.lives - 1);
+        return this.lives <= 0;
+    }
+
+    collectStar() { this.starsCollected++; }
+    collectChild() { this.friendsCollected++; }
+    addScore(points) { this.starsCollected += points; }
+}
+
+// ============================================================================
+// GAME CLASS
+// ============================================================================
+
+class Game {
+    constructor() {
+        this.state = STATE.TITLE;
+        this.stateTimer = 0;
+        this.scrollY = 0;
+        this.scrollSpeed = BASE_SCROLL_SPEED;
+        this.levelTime = 0;
+        this.bus = null;
+        this.obstaclePool = null;
+        this.starPool = null;
+        this.particles = null;
+        this.stations = [];
+        this.scoreManager = null;
+        this.input = null;
+        this.obstacleIndex = 0;
+        this.starIndex = 0;
+        this.currentLevel = null;
+        this._currentStation = null;
+        this.currentLevel = LEVEL_1;
+    }
+
+    init() {
+        this.input = new Input();
+        this.bus = new Bus(GAME_WIDTH / 2 - 40, GAME_HEIGHT - 90);
+        this.obstaclePool = new ObstaclePool(20);
+        this.starPool = new StarPool(10);
+        this.particles = new ParticleSystem();
+        this.scoreManager = new ScoreManager();
+        this.stations = this.currentLevel.stations.map(s => new Station(s.x, s.y, s.children));
+    }
+
+    loadLevel(levelData) {
+        this.scrollY = 0;
+        this.scrollSpeed = levelData.scrollSpeed;
+        this.levelTime = 0;
+        this.obstacleIndex = 0;
+        this.starIndex = 0;
+        this.bus = new Bus(GAME_WIDTH / 2 - 40, GAME_HEIGHT - 90);
+        this.obstaclePool = new ObstaclePool(20);
+        this.starPool = new StarPool(10);
+        this.particles = new ParticleSystem();
+        this.stations = levelData.stations.map(s => new Station(s.x, s.y, s.children));
+        this.scoreManager = new ScoreManager();
+    }
+
+    start() { this.state = STATE.INTRO; this.stateTimer = 0; }
+    stop() { this.state = STATE.TITLE; }
+
+    update(dt) {
+        this.stateTimer += dt;
+        this.input.flush();
+
+        switch (this.state) {
+            case STATE.TITLE: this.updateTitle(dt); break;
+            case STATE.INTRO: this.updateIntro(dt); break;
+            case STATE.PLAYING: this.updatePlaying(dt); break;
+            case STATE.STATION_STOP: this.updateStationStop(dt); break;
+            case STATE.HIT: this.updateHit(dt); break;
+            case STATE.LEVEL_COMPLETE: this.updateLevelComplete(dt); break;
+            case STATE.WIN: this.updateWin(dt); break;
+        }
+    }
+
+    updateTitle(dt) {
+        if (this.stateTimer > 2 || this.input.isActionPressed() || this.input.isTouching) {
+            this.loadLevel(LEVEL_1);
+            this.transitionTo(STATE.PLAYING);
+        }
+    }
+
+    updateIntro(dt) {
+        if (this.stateTimer > 3 || this.input.isActionPressed() || this.input.isTouching) {
+            this.loadLevel(LEVEL_1);
+            this.transitionTo(STATE.PLAYING);
+        }
+    }
+
+    updatePlaying(dt) {
+        this.scrollY += this.scrollSpeed * dt;
+        this.levelTime += dt;
+        this.bus.update(dt, this.input);
+        this.spawnObstacles();
+        this.spawnStars();
+        this.obstaclePool.update(dt, this.scrollSpeed);
+        this.starPool.update(dt, this.scrollSpeed);
+        this.particles.update(dt);
+        for (let station of this.stations) station.update(dt);
+        this.checkStationProximity();
+        this.checkCollisions();
+        if (this.scrollY >= this.currentLevel.worldHeight) {
+            this.transitionTo(STATE.LEVEL_COMPLETE);
+        }
+    }
+
+    updateStationStop(dt) {
+        this.bus.update(dt, this.input);
+        this.particles.update(dt);
+        for (let station of this.stations) station.update(dt);
+        if (this.stateTimer > 2) {
+            const currentStation = this.getCurrentStation();
+            if (currentStation && !currentStation.collected) {
+                currentStation.collected = true;
+                this.scoreManager.collectChild();
+                this.particles.emitSparkle(this.bus.x + this.bus.width / 2, this.bus.y);
+            }
+            this.bus.closeDoors();
+            this.transitionTo(STATE.PLAYING);
+        }
+    }
+
+    updateHit(dt) {
+        this.bus.update(dt, this.input);
+        this.particles.update(dt);
+        this.obstaclePool.update(dt, this.scrollSpeed * 0.5);
+        if (this.stateTimer > 0.5) {
+            if (this.scoreManager.lives <= 0) {
+                this.loadLevel(LEVEL_1);
+                this.scrollY = 0;
+                this.transitionTo(STATE.PLAYING);
+            } else {
+                this.transitionTo(STATE.PLAYING);
+            }
+        }
+    }
+
+    updateLevelComplete(dt) {
+        this.particles.update(dt);
+        if (this.stateTimer > 3) {
+            const allStationsComplete = this.stations.every(s => s.collected);
+            if (allStationsComplete) this.scoreManager.addScore(500);
+            this.transitionTo(STATE.WIN);
+        }
+    }
+
+    updateWin(dt) {
+        this.particles.update(dt);
+        if (this.stateTimer > 5 && (this.input.isActionPressed() || this.input.isTouching)) {
+            this.transitionTo(STATE.TITLE);
+        }
+    }
+
+    spawnObstacles() {
+        if (!this.currentLevel) return;
+        while (this.obstacleIndex < this.currentLevel.obstacles.length) {
+            const obs = this.currentLevel.obstacles[this.obstacleIndex];
+            if (-this.scrollY <= obs.y + 300) {
+                this.obstaclePool.spawn(obs.type, obs.lane, obs.y, {
+                    width: obs.width, height: obs.height
+                });
+                this.obstacleIndex++;
+            } else break;
+        }
+    }
+
+    spawnStars() {
+        if (!this.currentLevel) return;
+        while (this.starIndex < this.currentLevel.stars.length) {
+            const star = this.currentLevel.stars[this.starIndex];
+            if (-this.scrollY <= star.y + 300) {
+                this.starPool.spawn(star.x, star.y);
+                this.starIndex++;
+            } else break;
+        }
+    }
+
+    checkStationProximity() {
+        if (this.bus.isHit) return;
+        for (let station of this.stations) {
+            if (station.collected) continue;
+            const distance = Math.abs(this.bus.y - station.y);
+            if (distance < 50 && Math.abs(this.bus.vx) < 10) {
+                this.bus.isAtStation = true;
+                this.bus.openDoors();
+                this.bus.vx = 0;
+                station.activateChild();
+                this.setCurrentStation(station);
+                this.transitionTo(STATE.STATION_STOP);
+                return;
+            } else if (distance < 30 && !station.collected) {
+                station.collected = true;
+                this.scoreManager.loseLife();
+                this.particles.emitHit(this.bus.x + this.bus.width / 2, this.bus.y);
+                this.bus.hit();
+                this.transitionTo(STATE.HIT);
+            }
+        }
+    }
+
+    checkCollisions() {
+        if (this.bus.isHit) return;
+        const busHitbox = this.bus.getHitbox();
+        const obstacles = this.obstaclePool.getActiveObstacles();
+        for (let obs of obstacles) {
+            if (obs.hit) continue;
+            const obsHitbox = this.obstaclePool.getHitbox(obs);
+            if (this.aabbCollision(busHitbox, obsHitbox)) {
+                obs.hit = true;
+                this.scoreManager.loseLife();
+                this.particles.emitHit(obs.x + obs.width / 2, obs.y + obs.height / 2);
+                this.bus.hit();
+                this.transitionTo(STATE.HIT);
+                return;
+            }
+        }
+        const stars = this.starPool.getActiveStars();
+        for (let star of stars) {
+            const starHitbox = this.starPool.getHitbox(star);
+            if (this.aabbCollision(busHitbox, starHitbox)) {
+                star.collected = true;
+                star.active = false;
+                this.scoreManager.collectStar();
+                this.particles.emitSparkle(star.x, star.y);
+            }
+        }
+    }
+
+    aabbCollision(a, b) {
+        return a.x < b.x + b.width && a.x + a.width > b.x &&
+               a.y < b.y + b.height && a.y + a.height > b.y;
+    }
+
+    transitionTo(newState) {
+        this.state = newState;
+        this.stateTimer = 0;
+    }
+
+    getCurrentStation() { return this._currentStation || null; }
+    setCurrentStation(station) { this._currentStation = station; }
+
+    getState() { return this.state; }
+    getScrollY() { return this.scrollY; }
+    getBus() { return this.bus; }
+    getObstaclePool() { return this.obstaclePool; }
+    getStarPool() { return this.starPool; }
+    getParticles() { return this.particles; }
+    getStations() { return this.stations; }
+    getScoreManager() { return this.scoreManager; }
+}
+
+// ============================================================================
+// RENDERING — Costanti di disegno
+// ============================================================================
+
+const COLORS = {
+    YELLOW_BUS: '#F7C41F',
+    YELLOW_BUS_DARK: '#E5A800',
+    YELLOW_BUS_LIGHT: '#FFE066',
+    ROAD: '#4A4A4A',
+    ROAD_LINE: '#F7C41F',
+    SIDEWALK: '#B8D4A8',
+    GRASS: '#6DC04A',
+    SKY_TOP: '#87CEEB',
+    SKY_BOTTOM: '#C8E8F8',
+    STOP_SIGN: '#E53935',
+    STOP_POLE: '#8B8B8B',
+    CHILD_SKIN: '#F4A460',
+    CHILD_SHIRT: '#42A5F5',
+    CHILD_HAT: '#E53935',
+    CONE: '#FF6B35',
+    CONE_STRIPE: '#FFFFFF',
+    COW: '#F5F5F5',
+    COW_SPOTS: '#8B4513',
+    TREE_TRUNK: '#8B6914',
+    TREE_LEAVES: '#228B22',
+    STAR: '#FFD700',
+    STAR_SHINE: '#FFFACD',
+    WINDOW_BLUE: '#5DADE2',
+    WHEEL_COLOR: '#333333',
+    HEART_RED: '#E53935',
+    HEART_EMPTY: '#CCCCCC',
+    CLOUD: '#FFFFFF',
+    SHADOW: 'rgba(0,0,0,0.2)',
+};
+
+const _renderGameWidth = 480;
+const _renderGameHeight = 270;
+
+// ============================================================================
+// RENDERING — Utility
+// ============================================================================
+
+function _rrect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+}
+
+function _star(ctx, cx, cy, spikes, outerR, innerR, rot) {
+    let r = (Math.PI / 2 * 3) + rot;
+    const step = Math.PI / spikes;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - outerR);
+    for (let i = 0; i < spikes; i++) {
+        ctx.lineTo(cx + Math.cos(r) * outerR, cy + Math.sin(r) * outerR);
+        r += step;
+        ctx.lineTo(cx + Math.cos(r) * innerR, cy + Math.sin(r) * innerR);
+        r += step;
+    }
+    ctx.closePath();
+}
+
+// ============================================================================
+// RENDERING — Sky
+// ============================================================================
+
+function renderSky(ctx, scrollY) {
+    const g = ctx.createLinearGradient(0, 0, 0, _renderGameHeight);
+    g.addColorStop(0, COLORS.SKY_TOP);
+    g.addColorStop(1, COLORS.SKY_BOTTOM);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, _renderGameWidth, _renderGameHeight);
+
+    const cloudY = [30, 60, 90, 45];
+    const cloudX = [30, 180, 350, 440];
+    for (let i = 0; i < cloudY.length; i++) {
+        const offset = ((scrollY * 0.15) + i * 40) % (_renderGameHeight + 60) - 60;
+        ctx.fillStyle = COLORS.CLOUD;
+        ctx.globalAlpha = 0.7;
+        ctx.beginPath();
+        ctx.arc(cloudX[i], offset, 15, 0, Math.PI * 2);
+        ctx.arc(cloudX[i] + 18, offset - 5, 18, 0, Math.PI * 2);
+        ctx.arc(cloudX[i] + 38, offset, 14, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    }
+}
+
+// ============================================================================
+// RENDERING — Road
+// ============================================================================
+
+function renderRoad(ctx, scrollY) {
+    const roadTop = 90;
+    const roadH = _renderGameHeight - roadTop;
+    ctx.fillStyle = COLORS.ROAD;
+    ctx.fillRect(0, roadTop, _renderGameWidth, roadH);
+
+    ctx.fillStyle = COLORS.SIDEWALK;
+    ctx.fillRect(0, roadTop - 8, _renderGameWidth, 8);
+    ctx.fillStyle = COLORS.GRASS;
+    ctx.fillRect(0, roadTop - 8, _renderGameWidth, 5);
+
+    const laneW = _renderGameWidth / 3;
+    ctx.strokeStyle = COLORS.ROAD_LINE;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([20, 15]);
+    ctx.lineDashOffset = -(scrollY % 35);
+    for (let i = 1; i < 3; i++) {
+        const x = i * laneW;
+        ctx.beginPath();
+        ctx.moveTo(x, roadTop);
+        ctx.lineTo(x, _renderGameHeight);
+        ctx.stroke();
+    }
+    ctx.setLineDash([]);
+}
+
+// ============================================================================
+// RENDERING — Bus
+// ============================================================================
+
+function renderBus(ctx, bus) {
+    ctx.save();
+    ctx.translate(bus.x + bus.width / 2, bus.y + bus.height / 2);
+    ctx.rotate(bus.tilt);
+    ctx.translate(-bus.width / 2, -bus.height / 2);
+
+    // Shadow
+    ctx.fillStyle = COLORS.SHADOW;
+    ctx.beginPath();
+    ctx.ellipse(bus.width / 2, bus.height + 3, bus.width / 2 - 5, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Body
+    ctx.fillStyle = COLORS.YELLOW_BUS;
+    _rrect(ctx, 0, 5, bus.width, bus.height - 5, 8);
+    ctx.fill();
+
+    // Dark bottom
+    ctx.fillStyle = COLORS.YELLOW_BUS_DARK;
+    ctx.fillRect(5, bus.height - 12, bus.width - 10, 7);
+
+    // Windows
+    ctx.fillStyle = COLORS.WINDOW_BLUE;
+    const winY = 12;
+    const winH = 18;
+    for (let i = 0; i < 3; i++) {
+        const wx = 8 + i * 24;
+        ctx.fillRect(wx, winY, 18, winH);
+    }
+
+    // Driver window (Leone)
+    ctx.fillStyle = '#333';
+    ctx.fillRect(bus.width - 22, 8, 16, 22);
+    ctx.fillStyle = COLORS.CHILD_SKIN;
+    ctx.beginPath();
+    ctx.arc(bus.width - 14, 16, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = COLORS.CHILD_HAT;
+    ctx.beginPath();
+    ctx.arc(bus.width - 14, 12, 5, Math.PI, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#222';
+    ctx.fillRect(bus.width - 18, 20, 8, 2);
+
+    // Headlight
+    ctx.fillStyle = '#FFF9C4';
+    ctx.beginPath();
+    ctx.arc(5, bus.height / 2, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Turn signals
+    if (bus.doorsOpen || bus.isAtStation) {
+        if (bus.blinkOn) {
+            ctx.fillStyle = '#FF9800';
+            ctx.fillRect(bus.width - 4, 10, 4, 8);
+            ctx.fillRect(0, 10, 4, 8);
+        }
+    }
+
+    // Wheels
+    ctx.fillStyle = COLORS.WHEEL_COLOR;
+    ctx.beginPath();
+    ctx.arc(15, bus.height, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(bus.width - 15, bus.height, 7, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Door
+    if (bus.doorsOpen) {
+        ctx.fillStyle = '#333';
+        ctx.fillRect(30, 15, 12, 22);
+    }
+
+    ctx.restore();
+}
+
+// ============================================================================
+// RENDERING — Cone
+// ============================================================================
+
+function renderCone(ctx, x, y) {
+    ctx.fillStyle = COLORS.SHADOW;
+    ctx.beginPath();
+    ctx.ellipse(x + 10, y + 28, 8, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = COLORS.CONE;
+    ctx.beginPath();
+    ctx.moveTo(x + 10, y);
+    ctx.lineTo(x + 20, y + 28);
+    ctx.lineTo(x, y + 28);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = COLORS.CONE_STRIPE;
+    ctx.fillRect(x + 3, y + 12, 14, 4);
+}
+
+// ============================================================================
+// RENDERING — Cow
+// ============================================================================
+
+function renderCow(ctx, x, y, dir = 1) {
+    ctx.save();
+    ctx.translate(x, y);
+    if (dir < 0) { ctx.scale(-1, 1); ctx.translate(-40, 0); }
+
+    ctx.fillStyle = COLORS.SHADOW;
+    ctx.beginPath();
+    ctx.ellipse(20, 28, 18, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = COLORS.COW;
+    ctx.beginPath();
+    ctx.ellipse(20, 18, 18, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = COLORS.COW_SPOTS;
+    ctx.beginPath();
+    ctx.ellipse(15, 14, 5, 4, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(28, 18, 4, 3, -0.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = COLORS.COW;
+    ctx.beginPath();
+    ctx.ellipse(38, 22, 8, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#FFB6C1';
+    ctx.beginPath();
+    ctx.ellipse(44, 24, 4, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#333';
+    ctx.beginPath();
+    ctx.arc(40, 20, 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = COLORS.COW;
+    ctx.beginPath();
+    ctx.ellipse(36, 8, 3, 5, 0, 0, Math.PI * 2);
+    ctx.ellipse(40, 8, 3, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+}
+
+// ============================================================================
+// RENDERING — Tree
+// ============================================================================
+
+function renderTree(ctx, x, y) {
+    ctx.fillStyle = COLORS.SHADOW;
+    ctx.beginPath();
+    ctx.ellipse(x + 15, y + 38, 20, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = COLORS.TREE_TRUNK;
+    ctx.fillRect(x, y + 15, 30, 25);
+
+    ctx.fillStyle = COLORS.TREE_LEAVES;
+    ctx.beginPath();
+    ctx.arc(x + 15, y + 8, 18, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + 5, y + 15, 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + 25, y + 14, 13, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+// ============================================================================
+// RENDERING — Star
+// ============================================================================
+
+function renderStarShape(ctx, star) {
+    ctx.save();
+    ctx.translate(star.x, star.y);
+    ctx.rotate(star.rotation);
+    ctx.scale(star.scale, star.scale);
+
+    ctx.fillStyle = COLORS.STAR;
+    _star(ctx, 0, 0, 5, 12, 5, 0);
+    ctx.fill();
+
+    ctx.fillStyle = COLORS.STAR_SHINE;
+    ctx.globalAlpha = 0.5;
+    _star(ctx, 0, 0, 5, 6, 2.5, 0);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    ctx.restore();
+}
+
+// ============================================================================
+// RENDERING — Station
+// ============================================================================
+
+function renderStationShape(ctx, station) {
+    const x = station.x;
+    const y = station.y;
+
+    ctx.fillStyle = COLORS.SHADOW;
+    ctx.beginPath();
+    ctx.ellipse(x, y + 28, 15, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = COLORS.STOP_POLE;
+    ctx.fillRect(x - 3, y - 20, 6, 48);
+
+    ctx.fillStyle = COLORS.STOP_SIGN;
+    ctx.beginPath();
+    ctx.arc(x, y - 20, 14, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#FFF';
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('F', x, y - 20);
+
+    if (station.childWaiting && !station.collected) {
+        const cx = x + 20;
+        const cy = y + 10;
+        ctx.fillStyle = COLORS.CHILD_SKIN;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = COLORS.CHILD_SHIRT;
+        ctx.beginPath();
+        ctx.arc(cx, cy + 10, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = COLORS.CHILD_HAT;
+        ctx.beginPath();
+        ctx.arc(cx, cy - 3, 5, Math.PI, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+// ============================================================================
+// RENDERING — UI
+// ============================================================================
+
+function renderHearts(ctx, lives, maxLives, x, y) {
+    for (let i = 0; i < maxLives; i++) {
+        const hx = x + i * 16;
+        ctx.fillStyle = i < lives ? COLORS.HEART_RED : COLORS.HEART_EMPTY;
+        ctx.font = '12px Arial';
+        ctx.fillText('❤', hx, y);
+    }
+}
+
+function renderStarCounter(ctx, count, x, y) {
+    ctx.fillStyle = COLORS.STAR;
+    _star(ctx, x, y, 5, 7, 3, 0);
+    ctx.fill();
+    ctx.fillStyle = '#FFF';
+    ctx.font = 'bold 11px Arial';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(count, x + 10, y + 1);
+}
+
+function renderFriendCounter(ctx, friends, total, x, y) {
+    ctx.fillStyle = '#FFF';
+    ctx.font = 'bold 11px Arial';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('👦' + friends + '/' + total, x, y + 1);
+}
+
+// ============================================================================
+// RENDERING — Hit Overlay
+// ============================================================================
+
+function renderHitOverlay(ctx, intensity, flashAlpha) {
+    if (flashAlpha > 0) {
+        ctx.fillStyle = `rgba(255, 0, 0, ${flashAlpha})`;
+        ctx.fillRect(0, 0, _renderGameWidth, _renderGameHeight);
+    }
+}
+
+// ============================================================================
+// RENDERING — Main render function
+// ============================================================================
+
+function doRender(ctx, game) {
+    const scrollY = game.scrollY;
+    const scrollOffset = scrollY;
+    const state = game.getState();
+
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+
+    // Hit flash
+    if (state === STATE.HIT && game.stateTimer < 0.5) {
+        const flash = Math.sin(game.stateTimer * 30) > 0 ? 0.2 : 0;
+        renderHitOverlay(ctx, 0.5, flash);
+    }
+
+    // Background
+    renderSky(ctx, scrollOffset);
+    renderRoad(ctx, scrollOffset);
+
+    // Stations
+    for (let station of game.getStations()) {
+        const sy = station.y + scrollOffset;
+        if (sy > -50 && sy < _renderGameHeight + 50) {
+            const screenStation = { x: station.x, y: sy, childWaiting: station.childWaiting, collected: station.collected };
+            renderStationShape(ctx, screenStation);
+        }
+    }
+
+    // Obstacles
+    for (let obs of game.getObstaclePool().getActiveObstacles()) {
+        const oy = obs.y + scrollOffset;
+        if (oy > -50 && oy < _renderGameHeight + 50) {
+            if (obs.type === 'cone') renderCone(ctx, obs.x, oy);
+            else if (obs.type === 'cow') renderCow(ctx, obs.x, oy, obs.direction);
+            else if (obs.type === 'tree') renderTree(ctx, obs.x, oy);
+        }
+    }
+
+    // Stars
+    for (let star of game.getStarPool().getActiveStars()) {
+        const sy = star.y + scrollOffset;
+        if (sy > -30 && sy < _renderGameHeight + 30) {
+            renderStarShape(ctx, star);
+        }
+    }
+
+    // Bus
+    renderBus(ctx, game.getBus());
+
+    // Particles
+    game.getParticles().render(ctx);
+
+    // UI
+    const sm = game.getScoreManager();
+    renderHearts(ctx, sm.lives, sm.maxLives, 8, 16);
+    renderStarCounter(ctx, sm.starsCollected, _renderGameWidth - 60, 12);
+    renderFriendCounter(ctx, sm.friendsCollected, sm.totalFriends, _renderGameWidth - 60, 28);
+
+    ctx.restore();
+}
+
+// ============================================================================
+// AUDIO — Web Audio API synthesis
+// ============================================================================
+
+class AudioManager {
+    constructor() {
+        this.ctx = null;
+        this.masterGain = null;
+        this.bgmGain = null;
+        this.sfxGain = null;
+        this.bgmInterval = null;
+        this.isPlaying = false;
+        this.muted = false;
+    }
+
+    init() {
+        if (this.ctx) return;
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        this.masterGain = this.ctx.createGain();
+        this.masterGain.gain.value = 0.5;
+        this.masterGain.connect(this.ctx.destination);
+        this.bgmGain = this.ctx.createGain();
+        this.bgmGain.gain.value = 0.25;
+        this.bgmGain.connect(this.masterGain);
+        this.sfxGain = this.ctx.createGain();
+        this.sfxGain.gain.value = 0.5;
+        this.sfxGain.connect(this.masterGain);
+    }
+
+    _tone(freq, dur, type = 'square', vol = 0.4, delay = 0) {
+        if (!this.ctx || this.muted) return;
+        const t = this.ctx.currentTime + delay;
+        const osc = this.ctx.createOscillator();
+        const g = this.ctx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, t);
+        g.gain.setValueAtTime(vol, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+        osc.connect(g);
+        g.connect(this.sfxGain);
+        osc.start(t);
+        osc.stop(t + dur + 0.05);
+    }
+
+    _sweep(f1, f2, dur, type, vol = 0.3, delay = 0) {
+        if (!this.ctx || this.muted) return;
+        const t = this.ctx.currentTime + delay;
+        const osc = this.ctx.createOscillator();
+        const g = this.ctx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(f1, t);
+        osc.frequency.exponentialRampToValueAtTime(f2, t + dur);
+        g.gain.setValueAtTime(vol, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+        osc.connect(g);
+        g.connect(this.sfxGain);
+        osc.start(t);
+        osc.stop(t + dur + 0.05);
+    }
+
+    playStarCollect() {
+        this._sweep(880, 1760, 0.12, 'square', 0.35);
+    }
+
+    playHit() {
+        this._sweep(250, 80, 0.2, 'triangle', 0.3);
+    }
+
+    playStationArrive() {
+        this._tone(523, 0.15, 'square', 0.3, 0);
+        this._tone(392, 0.2, 'square', 0.3, 0.15);
+    }
+
+    playStationComplete() {
+        this._tone(523, 0.1, 'square', 0.3, 0);
+        this._tone(659, 0.1, 'square', 0.3, 0.1);
+        this._tone(784, 0.15, 'square', 0.3, 0.2);
+        this._tone(1047, 0.3, 'square', 0.25, 0.3);
+    }
+
+    playVictory() {
+        [523, 659, 784, 1047].forEach((f, i) => this._tone(f, 0.3, 'square', 0.25, i * 0.15));
+    }
+
+    playBusMove() {
+        this._tone(200, 0.05, 'sawtooth', 0.1);
+    }
+
+    startBGM() {
+        if (!this.ctx || this.isPlaying) return;
+        this.isPlaying = true;
+        const mel = [262, 330, 392, 523, 392, 523, 659, 784];
+        let idx = 0;
+        const play = () => {
+            if (!this.isPlaying) return;
+            const f = mel[idx % mel.length];
+            if (!this.muted) {
+                const t = this.ctx.currentTime;
+                const osc = this.ctx.createOscillator();
+                const g = this.ctx.createGain();
+                osc.type = 'square';
+                osc.frequency.value = f;
+                g.gain.value = 0.08;
+                osc.connect(g);
+                g.connect(this.bgmGain);
+                osc.start(t);
+                osc.stop(t + 0.2);
+            }
+            idx++;
+            this.bgmTimeout = setTimeout(play, 250);
+        };
+        play();
+    }
+
+    stopBGM() {
+        this.isPlaying = false;
+        if (this.bgmTimeout) clearTimeout(this.bgmTimeout);
+    }
+
+    setMuted(m) { this.muted = m; }
+}
+
+// ============================================================================
+// MAIN — Game Runner
+// ============================================================================
+
+class GameRunner {
+    constructor() {
+        this.canvas = null;
+        this.ctx = null;
+        this.game = null;
+        this.audio = null;
+        this.running = false;
+        this.lastTime = 0;
+        this.accumulator = 0;
+        this.audioInitialized = false;
+        this._hitState = { active: false, shakeIntensity: 0, flashAlpha: 0 };
+    }
+
+    init(canvasId) {
+        this.canvas = document.getElementById(canvasId);
+        this.ctx = this.canvas.getContext('2d');
+        this.canvas.width = _renderGameWidth;
+        this.canvas.height = _renderGameHeight;
+        this._resize();
+        window.addEventListener('resize', () => this._resize());
+
+        this.game = new Game();
+        this.game.init();
+        this.audio = new AudioManager();
+
+        // Input events
+        window.addEventListener('keydown', () => this._ensureAudio());
+        window.addEventListener('pointerdown', () => this._ensureAudio());
+        window.addEventListener('touchstart', () => this._ensureAudio(), { passive: true });
+
+        this._bindInput();
+    }
+
+    _resize() {
+        const scale = Math.min(
+            Math.floor(window.innerWidth / _renderGameWidth),
+            Math.floor(window.innerHeight / _renderGameHeight),
+            4
+        );
+        this.canvas.style.width = (_renderGameWidth * scale) + 'px';
+        this.canvas.style.height = (_renderGameHeight * scale) + 'px';
+    }
+
+    _ensureAudio() {
+        if (!this.audioInitialized) {
+            this.audioInitialized = true;
+            this.audio.init();
+            if (this.game.getState() === STATE.PLAYING || this.game.getState() === STATE.INTRO) {
+                this.audio.startBGM();
+            }
+        }
+    }
+
+    _bindInput() {
+        window.addEventListener('keydown', (e) => {
+            if (this.game) this.game.input.keys[e.code] = true;
+        });
+        window.addEventListener('keyup', (e) => {
+            if (this.game) this.game.input.keys[e.code] = false;
+        });
+        window.addEventListener('touchstart', (e) => {
+            if (!this.game || !this.game.input) return;
+            this.game.input.isTouching = true;
+            this.game.input.touchStartX = e.touches[0].clientX;
+            this.game.input.touchCurrentX = e.touches[0].clientX;
+            this.game.input.dragDeltaX = 0;
+        }, { passive: true });
+        window.addEventListener('touchmove', (e) => {
+            if (!this.game || !this.game.input || !this.game.input.isTouching) return;
+            this.game.input.touchCurrentX = e.touches[0].clientX;
+            this.game.input.dragDeltaX = this.game.input.touchCurrentX - this.game.input.touchStartX;
+        }, { passive: true });
+        window.addEventListener('touchend', () => {
+            if (!this.game || !this.game.input) return;
+            this.game.input.isTouching = false;
+            this.game.input.dragDeltaX = 0;
+        });
+    }
+
+    start() {
+        if (this.running) return;
+        this.running = true;
+        this.lastTime = performance.now();
+        requestAnimationFrame((t) => this._loop(t));
+    }
+
+    stop() {
+        this.running = false;
+        this.audio.stopBGM();
+    }
+
+    _loop(timestamp) {
+        if (!this.running) return;
+
+        const frameTime = timestamp - this.lastTime;
+        this.lastTime = timestamp;
+        this.accumulator += frameTime;
+        if (this.accumulator > FIXED_TIMESTEP * 5 * 1000) this.accumulator = FIXED_TIMESTEP * 5 * 1000;
+
+        while (this.accumulator >= FIXED_TIMESTEP * 1000) {
+            this.game.update(FIXED_TIMESTEP);
+            this.accumulator -= FIXED_TIMESTEP * 1000;
+        }
+
+        // Audio triggers
+        this._checkAudioTriggers();
+
+        this._render();
+        requestAnimationFrame((t) => this._loop(t));
+    }
+
+    _prevState = STATE.TITLE;
+    _prevStars = 0;
+    _prevLives = 3;
+    _prevFriends = 0;
+
+    _checkAudioTriggers() {
+        const state = this.game.getState();
+        const sm = this.game.getScoreManager();
+
+        // State transitions
+        if (state !== this._prevState) {
+            if (state === STATE.PLAYING || state === STATE.INTRO) {
+                this.audio.startBGM();
+            }
+            if (state === STATE.WIN) {
+                this.audio.stopBGM();
+                this.audio.playVictory();
+            }
+            if (state === STATE.LEVEL_COMPLETE) {
+                this.audio.playStationComplete();
+            }
+            if (this._prevState !== STATE.STATION_STOP && state === STATE.STATION_STOP) {
+                this.audio.playStationArrive();
+            }
+            this._prevState = state;
+        }
+
+        // Star collected
+        if (sm.starsCollected > this._prevStars) {
+            this.audio.playStarCollect();
+            this._prevStars = sm.starsCollected;
+        }
+
+        // Life lost
+        if (sm.lives < this._prevLives) {
+            this.audio.playHit();
+            this._prevLives = sm.lives;
+        }
+        // Sync after level reload (lives reset to 3, _prevLives might be 0)
+        if (sm.lives > this._prevLives) {
+            this._prevLives = sm.lives;
+            this._prevStars = sm.starsCollected;
+            this._prevFriends = sm.friendsCollected;
+        }
+
+        // Friend collected
+        if (sm.friendsCollected > this._prevFriends) {
+            this.audio.playStationComplete();
+            this._prevFriends = sm.friendsCollected;
+        }
+    }
+
+    _render() {
+        const ctx = this.ctx;
+        ctx.clearRect(0, 0, _renderGameWidth, _renderGameHeight);
+
+        const state = this.game.getState();
+
+        if (state === STATE.TITLE) {
+            this._renderTitle();
+        } else if (state === STATE.WIN) {
+            this._renderWin();
+        } else {
+            doRender(ctx, this.game);
+            this._renderOverlay(state);
+        }
+    }
+
+    _renderTitle() {
+        const ctx = this.ctx;
+        renderSky(ctx, 0);
+        renderRoad(ctx, 0);
+
+        // Bus fermo al centro
+        const demoBus = { x: _renderGameWidth / 2 - 40, y: _renderGameHeight - 100, width: 80, height: 45, tilt: 0, blinkOn: true, doorsOpen: false, isAtStation: false, isHit: false, hitTimer: 0 };
+        renderBus(ctx, demoBus);
+        this.game.getParticles().render(ctx);
+
+        // Titolo
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.fillRect(0, 40, _renderGameWidth, 80);
+        ctx.fillStyle = COLORS.YELLOW_BUS;
+        ctx.font = 'bold 28px Fredoka One, Comic Sans MS, cursive';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('LEONE BUS', _renderGameWidth / 2, 65);
+        ctx.fillStyle = '#FFF';
+        ctx.font = '14px Fredoka One, Comic Sans MS, cursive';
+        ctx.fillText('Il Giorno dello Scuolabus', _renderGameWidth / 2, 90);
+        ctx.font = '12px Fredoka One, Comic Sans MS, cursive';
+        ctx.fillStyle = '#FFD700';
+        ctx.fillText('▶ tocca per iniziare ◀', _renderGameWidth / 2, 130);
+    }
+
+    _renderWin() {
+        const ctx = this.ctx;
+        ctx.fillStyle = '#1a3a2a';
+        ctx.fillRect(0, 0, _renderGameWidth, _renderGameHeight);
+
+        // Stars sparkles
+        this.game.getParticles().render(ctx);
+
+        ctx.fillStyle = '#FFD700';
+        ctx.font = 'bold 36px Fredoka One, Comic Sans MS, cursive';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('BRAVO!', _renderGameWidth / 2, 90);
+
+        const sm = this.game.getScoreManager();
+        ctx.fillStyle = '#FFF';
+        ctx.font = '16px Fredoka One, Comic Sans MS, cursive';
+        ctx.fillText('Stelle: ' + sm.starsCollected, _renderGameWidth / 2, 135);
+        ctx.fillText('Amici: ' + sm.friendsCollected + '/' + sm.totalFriends, _renderGameWidth / 2, 158);
+
+        ctx.fillStyle = '#FFD700';
+        ctx.font = '12px Fredoka One, Comic Sans MS, cursive';
+        ctx.fillText('▶ tocca per ricominciare ◀', _renderGameWidth / 2, 200);
+    }
+
+    _renderOverlay(state) {
+        const ctx = this.ctx;
+        if (state === STATE.INTRO) {
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(0, 0, _renderGameWidth, _renderGameHeight);
+            ctx.fillStyle = '#FFF';
+            ctx.font = '14px Fredoka One, Comic Sans MS, cursive';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('🚌 Guida Leone e raccogli gli amici!', _renderGameWidth / 2, 50);
+        }
+        if (state === STATE.STATION_STOP) {
+            ctx.fillStyle = 'rgba(255,255,255,0.15)';
+            ctx.fillRect(0, 0, _renderGameWidth, _renderGameHeight);
+            ctx.fillStyle = '#FFD700';
+            ctx.font = 'bold 18px Fredoka One, Comic Sans MS, cursive';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('+1 AMICO!', _renderGameWidth / 2, 40);
+        }
+    }
+}
+
+// ============================================================================
+// START
+// ============================================================================
+
+const runner = new GameRunner();
+runner.init('game-canvas');
+runner.start();
+</script>
+</body>
+</html>
