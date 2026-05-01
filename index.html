@@ -8,7 +8,7 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
       width: 100%; height: 100%;
-      background: #1a1a2e;
+      background: #87CEEB;
       display: flex;
       justify-content: center;
       align-items: center;
@@ -19,6 +19,8 @@
       image-rendering: pixelated;
       image-rendering: crisp-edges;
       cursor: pointer;
+      border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
     }
   </style>
 </head>
@@ -229,8 +231,8 @@ class Bus {
     constructor(x, y) {
         this.x = x;
         this.y = y;
-        this.width = 80;
-        this.height = 45;
+        this.width = 45;   // Vertical orientation: narrow width
+        this.height = 80;  // Taller for upward-facing bus
         this.vx = 0;
         this.targetVx = 0;
         this.speed = BUS_SPEED_X;
@@ -243,6 +245,8 @@ class Bus {
         this.blinkTimer = 0;
         this.blinkOn = false;
         this.hitTimer = 0;
+        this.shieldActive = false;
+        this.magnetActive = false;
     }
 
     update(dt, input) {
@@ -556,7 +560,7 @@ class Game {
 
     init() {
         this.input = new Input();
-        this.bus = new Bus(GAME_WIDTH / 2 - 40, GAME_HEIGHT - 90);
+        this.bus = new Bus(GAME_WIDTH / 2 - 22, GAME_HEIGHT - 100);
         this.obstaclePool = new ObstaclePool(20);
         this.starPool = new StarPool(10);
         this.powerUpPool = new PowerUpPool(10);
@@ -575,7 +579,7 @@ class Game {
         this.obstacleIndex = 0;
         this.starIndex = 0;
         this.powerUpIndex = 0;
-        this.bus = new Bus(GAME_WIDTH / 2 - 40, GAME_HEIGHT - 90);
+        this.bus = new Bus(GAME_WIDTH / 2 - 22, GAME_HEIGHT - 100);
         this.obstaclePool = new ObstaclePool(20);
         this.starPool = new StarPool(10);
         this.powerUpPool = new PowerUpPool(10);
@@ -989,22 +993,50 @@ function _star(ctx, cx, cy, spikes, outerR, innerR, rot) {
 // ============================================================================
 
 function renderSky(ctx, scrollY) {
-    const g = ctx.createLinearGradient(0, 0, 0, _renderGameHeight);
-    g.addColorStop(0, COLORS.SKY_TOP);
-    g.addColorStop(1, COLORS.SKY_BOTTOM);
+    // Cheerful gradient sky - fills area ABOVE the road
+    // Road/grass starts at y=82, so sky is from y=0 to y=82
+    const skyBottom = 82;
+    const g = ctx.createLinearGradient(0, 0, 0, skyBottom);
+    g.addColorStop(0, '#5DADE2');   // Bright sky blue at top
+    g.addColorStop(0.6, '#85C1E9'); // Lighter blue middle
+    g.addColorStop(1, '#AED6F1');    // Very light blue near horizon
     ctx.fillStyle = g;
-    ctx.fillRect(0, 0, _renderGameWidth, _renderGameHeight);
+    ctx.fillRect(0, 0, _renderGameWidth, skyBottom);
 
-    const cloudY = [30, 60, 90, 45];
-    const cloudX = [30, 180, 350, 440];
-    for (let i = 0; i < cloudY.length; i++) {
-        const offset = ((scrollY * 0.15) + i * 40) % (_renderGameHeight + 60) - 60;
-        ctx.fillStyle = COLORS.CLOUD;
-        ctx.globalAlpha = 0.7;
+    // Sun (fixed position, top-left area, within sky)
+    const sunX = 50;
+    const sunY = 20;
+    ctx.fillStyle = 'rgba(255, 249, 196, 0.4)';
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, 24, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#FFF9C4';
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, 16, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#FFF176';
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, 12, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Clouds (within sky area, subtle parallax)
+    const cloudData = [
+        { x: 100, y: 25, s: 1.0 },
+        { x: 260, y: 45, s: 0.8 },
+        { x: 380, y: 20, s: 1.1 },
+        { x: 160, y: 60, s: 0.7 }
+    ];
+    for (let i = 0; i < cloudData.length; i++) {
+        const cd = cloudData[i];
+        const offset = ((scrollY * 0.1) + i * 20) % 60 - 10;
+        const cy = cd.y + offset;
+        const s = cd.s;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.globalAlpha = 0.9;
         ctx.beginPath();
-        ctx.arc(cloudX[i], offset, 15, 0, Math.PI * 2);
-        ctx.arc(cloudX[i] + 18, offset - 5, 18, 0, Math.PI * 2);
-        ctx.arc(cloudX[i] + 38, offset, 14, 0, Math.PI * 2);
+        ctx.arc(cd.x, cy, 12 * s, 0, Math.PI * 2);
+        ctx.arc(cd.x + 18 * s, cy - 3 * s, 15 * s, 0, Math.PI * 2);
+        ctx.arc(cd.x + 36 * s, cy, 11 * s, 0, Math.PI * 2);
         ctx.fill();
         ctx.globalAlpha = 1;
     }
@@ -1015,114 +1047,224 @@ function renderSky(ctx, scrollY) {
 // ============================================================================
 
 function renderRoad(ctx, scrollY) {
-    const roadTop = 90;
+    // Layout: sky=0-82, grass strip=82-92, sidewalk=92-102, road=102-270
+
+    // Grass strip (between sky and sidewalk)
+    ctx.fillStyle = '#66BB6A';  // Cheerful green
+    ctx.fillRect(0, 82, _renderGameWidth, 10);
+
+    // Grass texture (small stripes within grass area)
+    ctx.fillStyle = '#81C784';
+    const grassStripeOffset = (scrollY * 0.5) % 20;
+    for (let i = 0; i < 8; i++) {
+        const gy = 82 + ((i * 20 + grassStripeOffset) % 20);
+        if (gy >= 82 && gy < 92) {
+            ctx.fillRect(0, gy, _renderGameWidth, 4);
+        }
+    }
+
+    // Sidewalk (lighter gray)
+    ctx.fillStyle = '#BDBDBD';
+    ctx.fillRect(0, 92, _renderGameWidth, 10);
+
+    // Sidewalk tile lines
+    ctx.strokeStyle = '#9E9E9E';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < _renderGameWidth; x += 30) {
+        ctx.beginPath();
+        ctx.moveTo(x, 92);
+        ctx.lineTo(x, 102);
+        ctx.stroke();
+    }
+
+    // Road (from y=102 to bottom)
+    const roadTop = 102;
     const roadH = _renderGameHeight - roadTop;
-    ctx.fillStyle = COLORS.ROAD;
+    ctx.fillStyle = '#546E7A';  // Nice blue-gray asphalt
     ctx.fillRect(0, roadTop, _renderGameWidth, roadH);
 
-    ctx.fillStyle = COLORS.SIDEWALK;
-    ctx.fillRect(0, roadTop - 8, _renderGameWidth, 8);
-    ctx.fillStyle = COLORS.GRASS;
-    ctx.fillRect(0, roadTop - 8, _renderGameWidth, 5);
+    // Road edges (white lines)
+    ctx.fillStyle = '#ECEFF1';
+    ctx.fillRect(0, roadTop, _renderGameWidth, 3);
+    ctx.fillRect(0, _renderGameHeight - 3, _renderGameWidth, 3);
 
+    // Lane dividers (dashed yellow)
     const laneW = _renderGameWidth / 3;
-    ctx.strokeStyle = COLORS.ROAD_LINE;
+    ctx.strokeStyle = '#FFEB3B';
     ctx.lineWidth = 2;
     ctx.setLineDash([20, 15]);
     ctx.lineDashOffset = -(scrollY % 35);
     for (let i = 1; i < 3; i++) {
         const x = i * laneW;
         ctx.beginPath();
-        ctx.moveTo(x, roadTop);
-        ctx.lineTo(x, _renderGameHeight);
+        ctx.moveTo(x, roadTop + 5);
+        ctx.lineTo(x, _renderGameHeight - 5);
         ctx.stroke();
     }
     ctx.setLineDash([]);
+
+    // Bottom grass (after road, for visual continuity)
+    ctx.fillStyle = '#66BB6A';
+    ctx.fillRect(0, _renderGameHeight, _renderGameWidth, 20);
 }
 
 // ============================================================================
-// RENDERING — Bus
+// RENDERING — Bus (TOP-DOWN VIEW, driver at bottom, nose at top)
 // ============================================================================
 
-// Bus orientato upward: più alto che largo (45x80)
-// Driver (Leone) in basso, muso giallo in alto
 function renderBus(ctx, bus) {
-    ctx.save();
-    // Centro del bus per rotazione
-    ctx.translate(bus.x + bus.width / 2, bus.y + bus.height / 2);
-    ctx.rotate(bus.tilt);
-    ctx.translate(-bus.width / 2, -bus.height / 2);
+    const bw = 44;  // width
+    const bh = 72;  // height (taller than wide for vertical orientation)
+    const cx = bus.x + bus.width / 2;
+    const cy = bus.y + bus.height / 2;
 
-    const bw = bus.width;   // 45 - larghezza (asse corto)
-    const bh = bus.height;  // 80 - altezza (asse lungo)
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    // Tilt based on movement
+    const tiltAmount = (bus.vx / bus.speed) * 0.08;
+    ctx.rotate(tiltAmount);
 
     // Shadow
-    ctx.fillStyle = COLORS.SHADOW;
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
     ctx.beginPath();
-    ctx.ellipse(bw / 2, bh + 3, bw / 2 - 5, 6, 0, 0, Math.PI * 2);
+    ctx.ellipse(3, 5, bw / 2 + 2, bh / 2 - 8, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Body - orientato verticalmente
+    // === BODY ===
     ctx.fillStyle = COLORS.YELLOW_BUS;
-    _rrect(ctx, 0, 5, bw, bh - 5, 8);
+    _rrect(ctx, -bw / 2, -bh / 2, bw, bh, 10);
     ctx.fill();
 
-    // Dark bottom (lato driver in basso)
+    // Darker stripe at bottom (where driver sits)
     ctx.fillStyle = COLORS.YELLOW_BUS_DARK;
-    ctx.fillRect(5, bh - 12, bw - 10, 7);
+    _rrect(ctx, -bw / 2 + 4, bh / 2 - 14, bw - 8, 10, 4);
+    ctx.fill();
 
-    // Windows - 3 finestrini verticali sul retro
-    ctx.fillStyle = COLORS.WINDOW_BLUE;
-    const winX = 8;
-    const winW = 18;
-    const winH = 12;
+    // Lighter stripe at top (nose)
+    ctx.fillStyle = COLORS.YELLOW_BUS_LIGHT;
+    _rrect(ctx, -bw / 2 + 4, -bh / 2 + 4, bw - 8, 8, 4);
+    ctx.fill();
+
+    // === WINDSHIELD (top of bus, front) ===
+    ctx.fillStyle = '#AED6F1';
+    _rrect(ctx, -bw / 2 + 6, -bh / 2 + 14, bw - 12, 12, 3);
+    ctx.fill();
+    ctx.strokeStyle = '#85C1E9';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // === PASSENGER WINDOWS (3 windows below windshield) ===
+    ctx.fillStyle = '#AED6F1';
     for (let i = 0; i < 3; i++) {
-        const wy = 15 + i * 16;
-        ctx.fillRect(winX, wy, winW, winH);
+        const wy = -bh / 2 + 30 + i * 12;
+        _rrect(ctx, -bw / 2 + 6, wy, bw - 12, 8, 2);
+        ctx.fill();
+        ctx.strokeStyle = '#85C1E9';
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
     }
 
-    // Driver (Leone con cappellino rosso) - in basso
-    ctx.fillStyle = '#333';
-    ctx.fillRect(bw - 20, bh - 28, 16, 22);
+    // === DOOR (right side) ===
+    if (bus.doorsOpen) {
+        ctx.fillStyle = '#333';
+        _rrect(ctx, bw / 2 - 10, bh / 2 - 26, 8, 18, 2);
+        ctx.fill();
+    }
+
+    // === DRIVER SECTION (bottom of bus) ===
+    // Driver seat area
+    ctx.fillStyle = '#2C3E50';
+    _rrect(ctx, -bw / 2 + 4, bh / 2 - 20, bw - 8, 16, 4);
+    ctx.fill();
+
+    // Leone's head (visible from top)
     ctx.fillStyle = COLORS.CHILD_SKIN;
     ctx.beginPath();
-    ctx.arc(bw - 12, bh - 18, 6, 0, Math.PI * 2);
+    ctx.arc(0, bh / 2 - 12, 6, 0, Math.PI * 2);
     ctx.fill();
+
+    // Leone's red cap
     ctx.fillStyle = COLORS.CHILD_HAT;
     ctx.beginPath();
-    ctx.arc(bw - 12, bh - 22, 5, Math.PI, Math.PI * 2);
+    ctx.arc(0, bh / 2 - 14, 5, Math.PI, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#222';
-    ctx.fillRect(bw - 16, bh - 14, 8, 2);
 
-    // Headlight - muso in alto
+    // Leone's eyes (tiny dots)
+    ctx.fillStyle = '#333';
+    ctx.beginPath();
+    ctx.arc(-2, bh / 2 - 12, 1, 0, Math.PI * 2);
+    ctx.arc(2, bh / 2 - 12, 1, 0, Math.PI * 2);
+    ctx.fill();
+
+    // === WHEELS (left and right sides) ===
+    ctx.fillStyle = '#222';
+    // Left wheel
+    _rrect(ctx, -bw / 2 - 5, -bh / 4, 6, 16, 3);
+    ctx.fill();
+    // Right wheel
+    _rrect(ctx, bw / 2 - 1, -bh / 4, 6, 16, 3);
+    ctx.fill();
+
+    // Wheel highlights
+    ctx.fillStyle = '#444';
+    ctx.fillRect(-bw / 2 - 4, -bh / 4 + 2, 4, 4);
+    ctx.fillRect(bw / 2 + 1, -bh / 4 + 2, 4, 4);
+
+    // === HEADLIGHTS (top front) ===
     ctx.fillStyle = '#FFF9C4';
     ctx.beginPath();
-    ctx.arc(bw / 2, 8, 4, 0, Math.PI * 2);
+    ctx.arc(-bw / 2 + 10, -bh / 2 + 6, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(bw / 2 - 10, -bh / 2 + 6, 3, 0, Math.PI * 2);
     ctx.fill();
 
-    // Turn signals
+    // Headlight glow
+    ctx.fillStyle = 'rgba(255, 249, 196, 0.3)';
+    ctx.beginPath();
+    ctx.arc(-bw / 2 + 10, -bh / 2 + 6, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(bw / 2 - 10, -bh / 2 + 6, 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    // === TURN SIGNALS (blink when at station) ===
     if (bus.doorsOpen || bus.isAtStation) {
         if (bus.blinkOn) {
-            ctx.fillStyle = '#FF9800';
-            ctx.fillRect(10, 4, 8, 4);
-            ctx.fillRect(bw - 18, 4, 8, 4);
+            ctx.fillStyle = '#FFB300';
+            ctx.beginPath();
+            ctx.arc(-bw / 2 + 5, -bh / 2 + 6, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(bw / 2 - 5, -bh / 2 + 6, 3, 0, Math.PI * 2);
+            ctx.fill();
         }
     }
 
-    // Ruote sui lati
-    ctx.fillStyle = COLORS.WHEEL_COLOR;
-    ctx.beginPath();
-    ctx.arc(-3, 25, 7, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(-3, bh - 25, 7, 0, Math.PI * 2);
-    ctx.fill();
+    // === POWER-UP EFFECTS ===
+    // Shield glow
+    if (bus.shieldActive) {
+        ctx.strokeStyle = COLORS.SHIELD_BLUE;
+        ctx.lineWidth = 3;
+        ctx.globalAlpha = 0.5 + Math.sin(Date.now() / 100) * 0.3;
+        ctx.beginPath();
+        ctx.arc(0, 0, bw / 2 + 8, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+    }
 
-    // Door - sportello a destra
-    if (bus.doorsOpen) {
-        ctx.fillStyle = '#333';
-        ctx.fillRect(bw - 16, 15, 12, 22);
+    // Magnet effect
+    if (bus.magnetActive) {
+        ctx.strokeStyle = COLORS.MAGNET_RED;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.4;
+        for (let r = 20; r <= 40; r += 10) {
+            ctx.beginPath();
+            ctx.arc(0, 0, r, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
     }
 
     ctx.restore();
@@ -1133,21 +1275,33 @@ function renderBus(ctx, bus) {
 // ============================================================================
 
 function renderCone(ctx, x, y) {
-    ctx.fillStyle = COLORS.SHADOW;
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
     ctx.beginPath();
-    ctx.ellipse(x + 10, y + 28, 8, 3, 0, 0, Math.PI * 2);
+    ctx.ellipse(x + 10, y + 30, 12, 4, 0, 0, Math.PI * 2);
     ctx.fill();
 
+    // Cone body (orange with white stripe)
     ctx.fillStyle = COLORS.CONE;
     ctx.beginPath();
     ctx.moveTo(x + 10, y);
-    ctx.lineTo(x + 20, y + 28);
-    ctx.lineTo(x, y + 28);
+    ctx.lineTo(x + 22, y + 30);
+    ctx.lineTo(x - 2, y + 30);
     ctx.closePath();
     ctx.fill();
 
-    ctx.fillStyle = COLORS.CONE_STRIPE;
-    ctx.fillRect(x + 3, y + 12, 14, 4);
+    // White reflective stripe
+    ctx.fillStyle = '#FFF';
+    ctx.fillRect(x + 3, y + 12, 14, 5);
+
+    // Small highlight
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.beginPath();
+    ctx.moveTo(x + 10, y + 2);
+    ctx.lineTo(x + 6, y + 10);
+    ctx.lineTo(x + 14, y + 10);
+    ctx.closePath();
+    ctx.fill();
 }
 
 // ============================================================================
@@ -1161,41 +1315,74 @@ function renderCow(ctx, x, y, dir = 1) {
 
     ctx.fillStyle = COLORS.SHADOW;
     ctx.beginPath();
-    ctx.ellipse(20, 28, 18, 4, 0, 0, Math.PI * 2);
+    ctx.ellipse(20, 28, 18, 5, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = COLORS.COW;
+    ctx.fillStyle = '#F8F8F8';
     ctx.beginPath();
     ctx.ellipse(20, 18, 18, 12, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = COLORS.COW_SPOTS;
+    // Cute spots
+    ctx.fillStyle = '#8B4513';
     ctx.beginPath();
     ctx.ellipse(15, 14, 5, 4, 0.3, 0, Math.PI * 2);
     ctx.fill();
     ctx.beginPath();
     ctx.ellipse(28, 18, 4, 3, -0.2, 0, Math.PI * 2);
     ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(12, 22, 3, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
 
-    ctx.fillStyle = COLORS.COW;
+    // Head
+    ctx.fillStyle = '#F8F8F8';
     ctx.beginPath();
     ctx.ellipse(38, 22, 8, 6, 0, 0, Math.PI * 2);
     ctx.fill();
 
+    // Pink nose/muzzle
     ctx.fillStyle = '#FFB6C1';
     ctx.beginPath();
-    ctx.ellipse(44, 24, 4, 3, 0, 0, Math.PI * 2);
+    ctx.ellipse(44, 23, 4, 3, 0, 0, Math.PI * 2);
     ctx.fill();
 
+    // Nostrils
+    ctx.fillStyle = '#CC8B9A';
+    ctx.beginPath();
+    ctx.arc(43, 22, 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(45, 22, 1, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Cute eyes
     ctx.fillStyle = '#333';
     ctx.beginPath();
     ctx.arc(40, 20, 2, 0, Math.PI * 2);
     ctx.fill();
-
-    ctx.fillStyle = COLORS.COW;
+    // Eye shine
+    ctx.fillStyle = '#FFF';
     ctx.beginPath();
-    ctx.ellipse(36, 8, 3, 5, 0, 0, Math.PI * 2);
-    ctx.ellipse(40, 8, 3, 5, 0, 0, Math.PI * 2);
+    ctx.arc(40.5, 19.5, 0.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Ears
+    ctx.fillStyle = '#F8F8F8';
+    ctx.beginPath();
+    ctx.ellipse(36, 12, 4, 6, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(42, 12, 4, 6, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Horns (small)
+    ctx.fillStyle = '#F4D03F';
+    ctx.beginPath();
+    ctx.ellipse(36, 8, 2, 5, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(42, 8, 2, 5, 0.3, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.restore();
@@ -1206,23 +1393,57 @@ function renderCow(ctx, x, y, dir = 1) {
 // ============================================================================
 
 function renderTree(ctx, x, y) {
-    ctx.fillStyle = COLORS.SHADOW;
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.2)';
     ctx.beginPath();
-    ctx.ellipse(x + 15, y + 38, 20, 5, 0, 0, Math.PI * 2);
+    ctx.ellipse(x + 15, y + 42, 18, 5, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = COLORS.TREE_TRUNK;
-    ctx.fillRect(x, y + 15, 30, 25);
+    // Trunk
+    ctx.fillStyle = '#8B5A2B';
+    ctx.beginPath();
+    ctx.moveTo(x + 10, y + 40);
+    ctx.lineTo(x + 12, y + 18);
+    ctx.lineTo(x + 18, y + 18);
+    ctx.lineTo(x + 20, y + 40);
+    ctx.closePath();
+    ctx.fill();
 
+    // Trunk highlight
+    ctx.fillStyle = '#A0522D';
+    ctx.fillRect(x + 12, y + 20, 3, 18);
+
+    // Main foliage (big round green)
     ctx.fillStyle = COLORS.TREE_LEAVES;
     ctx.beginPath();
-    ctx.arc(x + 15, y + 8, 18, 0, Math.PI * 2);
+    ctx.arc(x + 15, y + 10, 18, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Secondary foliage blobs
+    ctx.fillStyle = '#4CAF50';
+    ctx.beginPath();
+    ctx.arc(x + 3, y + 16, 11, 0, Math.PI * 2);
     ctx.fill();
     ctx.beginPath();
-    ctx.arc(x + 5, y + 15, 12, 0, Math.PI * 2);
+    ctx.arc(x + 27, y + 14, 12, 0, Math.PI * 2);
     ctx.fill();
     ctx.beginPath();
-    ctx.arc(x + 25, y + 14, 13, 0, Math.PI * 2);
+    ctx.arc(x + 15, y + 3, 12, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Highlight on top foliage
+    ctx.fillStyle = 'rgba(255,255,255,0.15)';
+    ctx.beginPath();
+    ctx.arc(x + 10, y + 5, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Small red apples for cuteness
+    ctx.fillStyle = '#E53935';
+    ctx.beginPath();
+    ctx.arc(x + 8, y + 18, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + 22, y + 10, 3, 0, Math.PI * 2);
     ctx.fill();
 }
 
@@ -1973,7 +2194,7 @@ class GameRunner {
         renderRoad(ctx, 0);
 
         // Bus fermo al centro
-        const demoBus = { x: _renderGameWidth / 2 - 40, y: _renderGameHeight - 100, width: 80, height: 45, tilt: 0, blinkOn: true, doorsOpen: false, isAtStation: false, isHit: false, hitTimer: 0 };
+        const demoBus = { x: _renderGameWidth / 2 - 22, y: _renderGameHeight - 100, width: 45, height: 80, tilt: 0, blinkOn: true, doorsOpen: false, isAtStation: false, isHit: false, hitTimer: 0 };
         renderBus(ctx, demoBus);
         this.game.getParticles().render(ctx);
 
