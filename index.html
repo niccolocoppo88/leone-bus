@@ -1519,50 +1519,55 @@ function renderStarShape(ctx, star) {
 
 function renderStationShape(ctx, station, sy) {
     const x = station.x;
-    const y = sy; // Use screen Y (passed from render loop, not station.y which is world Y)
+    const y = sy; // Screen Y
 
-    // Shadow
+    // Shadow on ground
     ctx.fillStyle = COLORS.SHADOW;
     ctx.beginPath();
-    ctx.ellipse(x, y + 28, 15, 4, 0, 0, Math.PI * 2);
+    ctx.ellipse(x, y + 22, 12, 3, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Pole
+    // Pole (from ground up)
     ctx.fillStyle = COLORS.STOP_POLE;
-    ctx.fillRect(x - 3, y - 20, 6, 48);
+    ctx.fillRect(x - 2, y - 15, 5, 38);
 
-    // Sign
+    // Sign circle
     ctx.fillStyle = COLORS.STOP_SIGN;
     ctx.beginPath();
-    ctx.arc(x, y - 20, 14, 0, Math.PI * 2);
+    ctx.arc(x, y - 15, 12, 0, Math.PI * 2);
     ctx.fill();
 
+    // "F" on sign
     ctx.fillStyle = '#FFF';
-    ctx.font = 'bold 14px Arial';
+    ctx.font = 'bold 11px Arial';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('F', x, y - 20);
+    ctx.fillText('F', x, y - 15);
 
-    // Child — visible only when waiting AND station not collected yet
-    // Position child on the road surface (y + 15 = on road, y + 25 = standing)
+    // Child — positioned BESIDE the sign pole, at the same height as the sign
+    // so they're both clearly visible. Child is on the sidewalk (same y-level as sign).
     if (station.childWaiting && !station.collected) {
-        const cx = x + 20;
-        const cy = y + 20; // On road surface
-        // Body
+        const cx = x + 22; // To the right of the pole
+        const cy = y - 8;  // Same height as the sign (sign center is at y-15, child's center at y-8)
+
+        // Body (shirt)
         ctx.fillStyle = COLORS.CHILD_SHIRT;
         ctx.beginPath();
-        ctx.arc(cx, cy + 8, 6, 0, Math.PI * 2);
+        ctx.arc(cx, cy + 10, 6, 0, Math.PI * 2);
         ctx.fill();
-        // Head
+
+        // Head (skin)
         ctx.fillStyle = COLORS.CHILD_SKIN;
         ctx.beginPath();
         ctx.arc(cx, cy, 6, 0, Math.PI * 2);
         ctx.fill();
+
         // Hat
         ctx.fillStyle = COLORS.CHILD_HAT;
         ctx.beginPath();
         ctx.arc(cx, cy - 3, 5, Math.PI, Math.PI * 2);
         ctx.fill();
+
         // Eyes
         ctx.fillStyle = '#000';
         ctx.beginPath();
