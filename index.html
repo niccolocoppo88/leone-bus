@@ -57,11 +57,11 @@ const LEVEL_1 = {
     // Bus is at screen y ≈ 170. Station at world y=-50 → at scrollY=0: screen y=-50 (invisible above)
     // As scrollY increases, station scrolls down. When scrollY=220: screen y=170 (bus level!)
     stations: [
-        { y: -50, collected: false, children: 1, x: 80 },   // Lane 0 - FIRST stop (appears in ~0.6s)
-        { y: -450, collected: false, children: 1, x: 240 },  // Lane 1
-        { y: -900, collected: false, children: 1, x: 400 }, // Lane 2
-        { y: -1350, collected: false, children: 1, x: 160 }, // Lane 0
-        { y: -1800, collected: false, children: 1, x: 320 }, // Lane 1
+        { y: -120, collected: false, children: 1, x: 80 },  // Lane 0 - FIRST stop (appears quickly)
+        { y: -520, collected: false, children: 1, x: 240 }, // Lane 1
+        { y: -970, collected: false, children: 1, x: 400 }, // Lane 2
+        { y: -1420, collected: false, children: 1, x: 160 }, // Lane 0
+        { y: -1870, collected: false, children: 1, x: 320 }, // Lane 1
     ],
     // Obstacles: world Y starts at -200 (just above visible area)
     // They scroll from top of screen downward as player progresses
