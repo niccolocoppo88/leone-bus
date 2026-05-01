@@ -50,38 +50,66 @@ const STATE = {
 };
 
 const LEVEL_1 = {
-    duration: 60,
+    duration: 90,
     scrollSpeed: BASE_SCROLL_SPEED,
-    worldHeight: 3000,
+    worldHeight: 4000,
+    // Stations: MUST be reachable by bus (bus at world y=170)
+    // Road visible from screen y=102 to y=270 (bus center at y=170)
+    // Stations at screen y=200-230 = world y=200-230 (just below bus)
     stations: [
-        { y: -600, collected: false, children: 1, x: 160 },
-        { y: -1400, collected: false, children: 1, x: 320 },
-        { y: -2300, collected: false, children: 1, x: 240 }
+        { y: 250, collected: false, children: 1, x: 80 },   // Lane 0 (left)
+        { y: 700, collected: false, children: 1, x: 240 },  // Lane 1 (center)
+        { y: 1150, collected: false, children: 1, x: 400 }, // Lane 2 (right)
+        { y: 1600, collected: false, children: 1, x: 160 }, // Lane 0 (left)
+        { y: 2100, collected: false, children: 1, x: 320 }, // Lane 1 (center)
     ],
+    // Obstacles: spawn on the ROAD (screen y=102 to 270 initially)
+    // World y=110 to 2500 gives players time to react
+    // Spread across lanes 0,1,2 (x=80, 240, 400 center points)
     obstacles: [
-        { type: 'cone', lane: 1, y: -300, width: 20, height: 30 },
-        { type: 'cow', lane: -1, y: -700, direction: 1, width: 40, height: 30 },
-        { type: 'cone', lane: 0, y: -1100, width: 20, height: 30 },
-        { type: 'cone', lane: 2, y: -1700, width: 20, height: 30 },
-        { type: 'tree', lane: 1, y: -2100, width: 30, height: 40 }
+        // Early obstacles (close, easy to dodge)
+        { type: 'cone', lane: 0, y: 350, width: 20, height: 30 },
+        { type: 'cone', lane: 2, y: 500, width: 20, height: 30 },
+        { type: 'cone', lane: 1, y: 650, width: 20, height: 30 },
+        // Mid obstacles
+        { type: 'cow', lane: 0, y: 850, direction: 1, width: 40, height: 30 },
+        { type: 'cone', lane: 2, y: 1000, width: 20, height: 30 },
+        { type: 'cone', lane: 1, y: 1300, width: 20, height: 30 },
+        { type: 'tree', lane: 0, y: 1500, width: 30, height: 40 },
+        { type: 'cone', lane: 2, y: 1750, width: 20, height: 30 },
+        { type: 'cow', lane: 1, y: 1950, direction: 1, width: 40, height: 30 },
+        // Late obstacles
+        { type: 'cone', lane: 0, y: 2200, width: 20, height: 30 },
+        { type: 'tree', lane: 2, y: 2400, width: 30, height: 40 },
+        { type: 'cone', lane: 1, y: 2600, width: 20, height: 30 },
+        { type: 'cow', lane: 0, y: 2850, direction: 1, width: 40, height: 30 },
     ],
+    // Stars: spread across all lanes on the road area
     stars: [
-        { x: 100, y: -200 },
-        { x: 380, y: -400 },
-        { x: 240, y: -800 },
-        { x: 80, y: -1000 },
-        { x: 400, y: -1300 },
-        { x: 160, y: -1600 },
-        { x: 320, y: -1900 },
-        { x: 240, y: -2500 }
+        { x: 80, y: 180 },
+        { x: 400, y: 320 },
+        { x: 240, y: 480 },
+        { x: 80, y: 620 },
+        { x: 400, y: 780 },
+        { x: 240, y: 920 },
+        { x: 80, y: 1080 },
+        { x: 400, y: 1250 },
+        { x: 240, y: 1400 },
+        { x: 80, y: 1550 },
+        { x: 400, y: 1700 },
+        { x: 240, y: 1850 },
+        { x: 80, y: 2000 },
+        { x: 400, y: 2150 },
+        { x: 240, y: 2300 },
+        { x: 80, y: 2450 },
     ],
     // Power-up spawn positions (type, x, worldY)
     powerups: [
-        { type: 'shield', y: -500, x: 240 },
-        { type: 'magnet', y: -900, x: 120 },
-        { type: 'slowmo', y: -1500, x: 360 },
-        { type: 'jump', y: -2000, x: 180 },
-        { type: 'double', y: -2700, x: 300 }
+        { type: 'shield', y: 550, x: 240 },
+        { type: 'magnet', y: 1100, x: 400 },
+        { type: 'slowmo', y: 1700, x: 80 },
+        { type: 'jump', y: 2300, x: 240 },
+        { type: 'double', y: 2900, x: 400 },
     ]
 };
 
@@ -814,8 +842,21 @@ class Game {
         if (this.bus.isHit) return;
         for (let station of this.stations) {
             if (station.collected) continue;
-            const distance = Math.abs(this.bus.y - station.y);
-            if (distance < 50 && Math.abs(this.bus.vx) < 10) {
+
+            // Calculate SCREEN distance (both bus and station positions are screen-relative)
+            const busScreenY = this.bus.y + this.bus.height / 2;
+            const stationScreenY = station.y + this.scrollY;
+            const distanceY = Math.abs(busScreenY - stationScreenY);
+
+            // Check if bus is aligned with station (same lane approximation)
+            const busCenterX = this.bus.x + this.bus.width / 2;
+            const laneWidth = GAME_WIDTH / 3;
+            const busLane = Math.floor(busCenterX / laneWidth);
+            const stationLane = station.x < laneWidth ? 0 : (station.x < laneWidth * 2 ? 1 : 2);
+            const sameLane = Math.abs(busLane - stationLane) <= 1;
+
+            // Stop if bus is close enough and in roughly the right lane
+            if (distanceY < 60 && sameLane && Math.abs(this.bus.vx) < 20) {
                 this.bus.isAtStation = true;
                 this.bus.openDoors();
                 this.bus.vx = 0;
@@ -823,12 +864,15 @@ class Game {
                 this.setCurrentStation(station);
                 this.transitionTo(STATE.STATION_STOP);
                 return;
-            } else if (distance < 30 && !station.collected) {
-                // Doppio-punishment rimosso: il passeggero non viene perso insieme alla vita
+            }
+
+            // Collision: hit station while moving too fast
+            if (distanceY < 40 && !station.collected) {
                 this.scoreManager.loseLife();
                 this.particles.emitHit(this.bus.x + this.bus.width / 2, this.bus.y);
                 this.bus.hit();
                 this.transitionTo(STATE.HIT);
+                return;
             }
         }
     }
